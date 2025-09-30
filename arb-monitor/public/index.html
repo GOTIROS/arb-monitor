@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>赔率监控套利系统</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <!-- 汉堡菜单按钮 -->
+    <button class="hamburger-btn" id="hamburgerBtn">
+        <span></span>
+        <span></span>
+        <span></span>
+    </button>
+
+    <!-- 侧边抽屉 -->
+    <div class="drawer-overlay" id="drawerOverlay"></div>
+    <div class="drawer" id="drawer">
+        <div class="drawer-header">
+            <h3>系统设置</h3>
+            <div class="drawer-controls">
+                <button id="expandAllBtn">全部展开</button>
+                <button id="collapseAllBtn">全部折叠</button>
+            </div>
+        </div>
+        <div class="drawer-content">
+            <details id="panel-datasource">
+                <summary>数据源配置</summary>
+                <div class="panel-content">
+                    <div class="datasource-form">
+                        <div class="form-group">
+                            <label>连接模式</label>
+                            <label class="checkbox-item">
+                                <input type="radio" name="ws-mode" value="auto" id="ws-mode-auto" checked>
+                                <span>自动（同源）</span>
+                            </label>
+                            <label class="checkbox-item">
+                                <input type="radio" name="ws-mode" value="custom" id="ws-mode-custom">
+                                <span>自定义地址</span>
+                            </label>
+                        </div>
+                        <div class="form-group">
+                            <label for="ws-url">WebSocket 地址</label>
+                            <input type="url" id="ws-url" placeholder="wss://your-domain/ws/opps" disabled>
+                        </div>
+                        <div class="form-group">
+                            <label for="ws-token">鉴权 Token（可选）</label>
+                            <input type="text" id="ws-token" placeholder="输入访问令牌">
+                        </div>
+                        <div class="toggle-item">
+                            <label for="use-mock">使用模拟数据</label>
+                            <div class="toggle-switch">
+                                <input type="checkbox" id="use-mock" checked>
+                                <span class="toggle-slider"></span>
+                            </div>
+                        </div>
+                        <button type="button" id="test-connection" class="test-connection-btn">测试连接</button>
+                        <button type="button" id="reconnect-now" class="reconnect-btn" style="display: none;">重新连接</button>
+                    </div>
+                </div>
+            </details>
+
+            <details id="panel-books">
+                <summary>书商选择</summary>
+                <div class="panel-content">
+                    <div class="book-list" id="book-list">
+                        <!-- 动态生成书商列表 -->
+                    </div>
+                </div>
+            </details>
+
+            <details id="panel-rebates">
+                <summary>返水设置</summary>
+                <div class="panel-content">
+                    <!-- 动态生成返水设置 -->
+                </div>
+            </details>
+
+            <details id="panel-stake">
+                <summary>投注设置</summary>
+                <div class="panel-content">
+                    <div class="form-row">
+                        <label>A 平台：</label>
+                        <select id="a-book">
+                            <option value="parimatch">Parimatch</option>
+                            <option value="singbet">SingBet</option>
+                        </select>
+                    </div>
+                    <div class="form-row">
+                        <label>固定下注金额：</label>
+                        <input type="number" id="amount-a" min="0" step="100" placeholder="10000">
+                    </div>
+                    <div class="form-row">
+                        <label>最小盈利阈值：</label>
+                        <input type="number" id="min-profit" min="0" step="1" placeholder="0">
+                    </div>
+                </div>
+            </details>
+
+            <details id="panel-notify">
+                <summary>通知设置</summary>
+                <div class="panel-content">
+                    <label class="checkbox-item">
+                        <input type="checkbox" id="system-notify">
+                        <span>系统通知</span>
+                    </label>
+                    <label class="checkbox-item">
+                        <input type="checkbox" id="sound-notify">
+                        <span>声音提醒</span>
+                    </label>
+                    <label class="checkbox-item">
+                        <input type="checkbox" id="toast-notify">
+                        <span>Toast提醒</span>
+                    </label>
+                    <div class="form-row">
+                        <label>弹窗显示时间(秒)：</label>
+                        <input type="number" id="toast-duration" min="1" max="30" placeholder="5">
+                    </div>
+                    <div class="form-row">
+                        <label>提醒行自动隐藏(秒)：</label>
+                        <input type="number" id="auto-hide-row" min="0" max="300" placeholder="30">
+                    </div>
+                    <button id="clear-alerts" class="clear-btn">清除已提醒记录</button>
+                </div>
+            </details>
+        </div>
+    </div>
+
+    <!-- 主内容区域 -->
+    <div class="main-content">
+        <!-- 状态卡片 -->
+        <div class="status-card">
+            <div class="status-header">
+                <div class="status-title">
+                    <h1>赔率监控套利系统</h1>
+                    <p>实时监控体育博彩套利机会</p>
+                </div>
+                <div class="status-badge" id="statusBadge">连接中...</div>
+            </div>
+            <div class="connection-error" id="connectionError" style="display: none;">
+                <span class="error-icon">⚠️</span>
+                服务器断开连接，请检查服务和网络
+            </div>
+            <div class="last-update">
+                最后更新：<span id="lastUpdateTime">--:--:--</span>
+            </div>
+        </div>
+
+        <!-- 盘口行情总览 -->
+        <div class="market-card">
+            <details id="panel-marketboard">
+                <summary>
+                    盘口行情总览
+                    <div class="market-controls">
+                        <button id="sortByLeague">按联赛排序</button>
+                        <button id="sortByTime" class="active">按时间排序</button>
+                    </div>
+                </summary>
+                <button class="collapse-btn" id="market-collapse-btn" title="折叠/展开"></button>
+                <div class="market-content">
+                    <div class="table-container">
+                        <table id="marketTable">
+                            <thead>
+                                <tr>
+                                    <th>书商</th>
+                                    <th>联赛</th>
+                                    <th>主队</th>
+                                    <th>客队</th>
+                                    <th>比分</th>
+                                    <th>大小球赔率(OU)</th>
+                                    <th>让球赔率(AH)</th>
+                                    <th>更新时间</th>
+                                </tr>
+                            </thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+            </details>
+        </div>
+
+        <!-- 套利机会列表 -->
+        <div class="arbitrage-card">
+            <h2>套利机会列表</h2>
+            <div class="table-container">
+                <table id="arbitrageTable">
+                    <thead>
+                        <tr>
+                            <th>赛事</th>
+                            <th>盘口</th>
+                            <th>选择A</th>
+                            <th>选择B</th>
+                            <th>水位A(HK)</th>
+                            <th>水位B(HK)</th>
+                            <th>应下注B(¥)</th>
+                            <th>均衡盈利(¥)</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr class="no-data">
+                            <td colspan="8">暂无数据</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast 容器 -->
+    <div id="toast-stack"></div>
+
+    <script src="app.js"></script>
+</body>
+</html>
