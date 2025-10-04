@@ -447,10 +447,13 @@ function handleWebSocketMessage(message) {
             updateLastUpdateTime();
             break;
             
-        case 'snapshot':
-            handleSnapshot(message.data || []);
+        case 'snapshot': {
+            // ★ 新增：兼容 { data: [...] } 和 { rows: [...] }
+            const rowsOrOpps = message.data || message.rows || [];
+            handleSnapshotCompat(rowsOrOpps);
             updateLastUpdateTime();
             break;
+        }
             
         case 'opportunity':
             handleOpportunity(message.data);
@@ -462,6 +465,95 @@ function handleWebSocketMessage(message) {
     }
 }
 
+// === 兼容 mock 行情行的快照处理（rows 格式）========================
+function handleSnapshotCompat(rows) {
+    // rows 可能是“机会对象数组”或“盘口行数组”
+    if (!Array.isArray(rows)) return;
+
+    // 先清空
+    marketBoard.clear();
+    clearArbitrageTable();
+
+    // 模拟数据模式下重置默认书商
+    if (settings.datasource?.useMock) {
+        clearDiscoveredBooks();
+    }
+
+    // 逐行累加到 marketBoard
+    rows.forEach(row => {
+        // 如果是“机会对象”（带 pickA/pickB），走你原来的处理
+        if (row && (row.pickA || row.pickB)) {
+            if (row.pickA?.book) addDiscoveredBook(row.pickA.book);
+            if (row.pickB?.book) addDiscoveredBook(row.pickB.book);
+            processOpportunity(row, false);
+            return;
+        }
+
+        // 否则当成“盘口行”来处理（兼容字段：league_zh/home_zh/away_zh、row.ou/row.ah、row.books）
+        const book = normBookKey(row.book || (Array.isArray(row.books) ? row.books[0] : ''));
+        if (book) addDiscoveredBook(book);
+        upsertRowIntoMarketBoard(row, book);
+    });
+
+    // 渲染盘口列表
+    renderMarketBoard();
+    // 基于累加结果重新计算套利机会
+    recalculateAllArbitrageOpportunities();
+}
+
+// 把一行盘口（含 ou/ah）累加到 marketBoard
+function upsertRowIntoMarketBoard(row, book) {
+    // 取联盟/队名，兼容 *_zh / *_en
+    const league = row.league || row.league_zh || row.league_en || '';
+    const home   = row.home   || row.home_zh   || row.home_en   || '';
+    const away   = row.away   || row.away_zh   || row.away_en   || '';
+    const score  = row.score  || row.score_text || '';
+
+    const event_name = row.event_name || ((home && away) ? `${home} vs ${away}` : '');
+    const base = { league, event_name };
+
+    const eventId = getEventKey(base);
+    const existing = marketBoard.get(eventId) || {
+        league: league || '',
+        home: home || '',
+        away: away || '',
+        score: score || '',
+        books: new Set(),
+        ou: { line: '', over: null, under: null },
+        ah: { line: '', home: null, away: null },
+        updatedAt: 0
+    };
+
+    // 基础信息更新
+    if (league) existing.league = league;
+    if (home)   existing.home   = home;
+    if (away)   existing.away   = away;
+    if (score)  existing.score  = score;
+    existing.updatedAt = Date.now();
+    if (book) existing.books.add(book);
+
+    // OU：{ line, over, under }
+    if (row.ou) {
+        const lineOu = row.ou.line ?? row.ou_line ?? row.ou.line_text;
+        if (lineOu !== undefined) existing.ou.line = String(lineOu);
+        if (row.ou.over  !== undefined) existing.ou.over  = { book, odds: Number(row.ou.over)  };
+        if (row.ou.under !== undefined) existing.ou.under = { book, odds: Number(row.ou.under) };
+    }
+
+    // AH：{ line, home, away }
+    if (row.ah) {
+        const lineAh = row.ah.line ?? row.ah_line ?? row.ah.line_text;
+        if (lineAh !== undefined) existing.ah.line = String(lineAh);
+        if (row.ah.home !== undefined) existing.ah.home = { book, odds: Number(row.ah.home) };
+        if (row.ah.away !== undefined) existing.ah.away = { book, odds: Number(row.ah.away) };
+    }
+
+    marketBoard.set(eventId, existing);
+}
+// === 兼容处理 END ===================================================
+
+
+// 机会处理逻辑
 function handleSnapshot(opportunities) {
     console.log('收到快照数据:', opportunities.length, '条');
     
@@ -787,8 +879,6 @@ function recalculateAllArbitrageOpportunities() {
     
     // 重新处理所有盘口数据
     marketBoard.forEach((data, eventId) => {
-        // 根据盘口数据重新构造机会对象并计算
-        
         // 处理大小球机会
         if (data.ou.line && data.ou.over && data.ou.under) {
             const ouOpp = {
