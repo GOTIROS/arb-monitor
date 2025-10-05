@@ -1,3 +1,8 @@
+# 进入你的代码目录
+cd /path/to/arb-monitor
+
+# 一次性覆盖 public/app.js
+cat > public/app.js <<'JS'
 /* =======================================================
    arb-monitor — public/app.js
    完整版（可直接替换 GitHub 文件）
@@ -360,7 +365,7 @@ function updateMarketBoard(opp) {
 }
 
 function calculateArbitrage(opp) {
-  if (!opp?.pickA || !opp?.pickB) return null;
+  if (!opp?.pickA || !opp.pickB) return null;
 
   const bookA = normBookKey(opp.pickA.book);
   const bookB = normBookKey(opp.pickB.book);
@@ -1102,3 +1107,4 @@ document.addEventListener('DOMContentLoaded', ()=>{
   initUI(loaded);
   connectWS();
 });
+JS
