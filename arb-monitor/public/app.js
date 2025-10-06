@@ -352,18 +352,18 @@ function updateMarketBoard(opp) {
 
   if (opp.market==='ou') {
     cur.ou.line = opp.line_text || (opp.line_numeric?.toString()||'');
-    if (opp.pickA?.selection?.toLowerCase()==='over') {
+    if ((opp.pickA?.selection||'').toLowerCase()==='over') {
       cur.ou.over = { book:normBookKey(opp.pickA.book), odds: opp.pickA.odds };
     }
-    if (opp.pickB?.selection?.toLowerCase()==='under') {
+    if ((opp.pickB?.selection||'').toLowerCase()==='under') {
       cur.ou.under = { book:normBookKey(opp.pickB.book), odds: opp.pickB.odds };
     }
   } else if (opp.market==='ah') {
     cur.ah.line = opp.line_text || (opp.line_numeric?.toString()||'');
-    if (opp.pickA?.selection?.toLowerCase()==='home') {
+    if ((opp.pickA?.selection||'').toLowerCase()==='home') {
       cur.ah.home = { book:normBookKey(opp.pickA.book), odds: opp.pickA.odds };
     }
-    if (opp.pickB?.selection?.toLowerCase()==='away') {
+    if ((opp.pickB?.selection||'').toLowerCase()==='away') {
       cur.ah.away = { book:normBookKey(opp.pickB.book), odds: opp.pickB.odds };
     }
   }
@@ -557,17 +557,26 @@ function sendAlert(result) {
   if (alertedSignatures.has(sig)) return;
   alertedSignatures.add(sig);
 
-  const opp = result.opportunity;
-  const marketText = opp.market==='ah' ? '让球' : '大小球';
-  const lineText = opp.line_text || (opp.line_numeric?.toString()||'');
-  const sA = settings.stake?.amountA || 10000;
+  const opp        = result.opportunity;
+  const marketText = opp.market === 'ah' ? '让球' : '大小球';
+  const lineText   = opp.line_text || (opp.line_numeric?.toString() || '');
+  const league     = opp.league || '';
+  const teams      = opp.event_name || '';
+  const sA         = settings.stake?.amountA || 10000;
 
-  const msg = `提醒：A平台${marketText}${lineText}水位${result.waterA}固定下注${sA.toLocaleString()}，B平台${marketText}${lineText}水位${result.waterB}应下注金额${result.stakeB.toLocaleString()}，均衡盈利${result.profit.toLocaleString()}`;
+  // 标题带上联赛与球队
+  const title = `套利机会 · ${league} · ${teams}`;
+  // 用 <br> 强制换行，避免样式依赖
+  const msg =
+    `盘口：${marketText} ${lineText}<br>` +
+    `A 水位：${result.waterA}（固定 ${sA.toLocaleString()}）<br>` +
+    `B 水位：${result.waterB}（应下 ${result.stakeB.toLocaleString()}）<br>` +
+    `均衡盈利：${result.profit.toLocaleString()}`;
 
-  if (settings.notify?.toastEnabled) showToast('套利机会', msg, 'success');
+  if (settings.notify?.toastEnabled) showToast(title, msg, 'success');
 
   if (settings.notify?.systemEnabled && 'Notification' in window && Notification.permission==='granted') {
-    new Notification('套利机会', { body: msg, icon:'/favicon.ico' });
+    new Notification(title, { body: `${league} ${teams}  ${marketText}${lineText}  盈利 ${result.profit.toLocaleString()}`, icon:'/favicon.ico' });
   }
   if (settings.notify?.soundEnabled && hasUserInteracted) {
     playNotificationSound();
@@ -644,7 +653,7 @@ function renderMarketBoard() {
         away: data.away || '',
         score: data.score || '',
         ouText: data.ou.line ? `${data.ou.line} (${data.ou.over ? data.ou.over.odds : '-'}/${data.ou.under ? data.ou.under.odds : '-'})` : '-',
-        ahText: data.ah.line ? `${data.ah.home ? data.ah.home.odds : '-'}/${data.ah.away ? data.ah.away.odds : '-'}` : '-',
+        ahText: data.ah.line ? `${data.ah.line} (${data.ah.home ? data.ah.home.odds : '-'}/${data.ah.away ? data.ah.away.odds : '-'})` : '-',
         kickoffAt: data.kickoffAt || 0,
         updatedAt: data.updatedAt || 0
       });
