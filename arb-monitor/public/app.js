@@ -12,7 +12,7 @@ let lastHeartbeat = 0;
 let heartbeatTimer = null;
 
 let settings = {};
-let marketBoard = new Map();       // eventKey -> {league, home, away, score, books:Set, ou:{}, ah:{}, updatedAt, kickoffAt}
+let marketBoard = new Map();       // eventKey -> {league, home, away, score, books:Set, ouMap:Map, ahMap:Map, updatedAt, kickoffAt}
 let alertedSignatures = new Set(); // 已提醒的签名
 let hasUserInteracted = false;
 let discoveredBooks = new Set();   // 动态发现（不再预置）
@@ -111,8 +111,9 @@ function addDiscoveredBook(book) {
   const b = normBookKey(book);
   if (!discoveredBooks.has(b)) {
     discoveredBooks.add(b);
+    // 新书商默认启用：只要不是显式 false
     if (!(b in settings.books)) {
-      settings.books[b] = true; // 新书商默认启用
+      settings.books[b] = true;
       saveSettings();
     }
     renderBookList();
@@ -146,7 +147,7 @@ function connectWS() {
     return;
   }
 
-  // 改成：如果是自定义且没填 URL，就不尝试连接
+  // 如果是自定义且没填 URL，就不尝试连接
   if (settings.datasource?.wsMode==='custom'
       && !((settings.datasource?.wsUrl||'').trim())) {
     updateConnectionStatus('connecting'); // 显示待配置
@@ -314,20 +315,51 @@ function processOpportunity(opp, shouldAlert) {
   if (result) addArbitrageOpportunity(result, shouldAlert);
 }
 
-function updateMarketBoard(opp) {
-  const key = getEventKey(opp);
-  const cur = marketBoard.get(key) || {
+function ensureEventContainer(key) {
+  const cur = marketBoard.get(key);
+  if (cur) return cur;
+  const obj = {
     league:'', home:'', away:'', score:'',
     books:new Set(),
-    ou:{line:'', over:null, under:null},
-    ah:{line:'', home:null, away:null},
+    ouMap:new Map(), // book -> { line, over, under }
+    ahMap:new Map(), // book -> { line, home, away }
     updatedAt: 0,
     kickoffAt: undefined
   };
+  marketBoard.set(key, obj);
+  return obj;
+}
+
+function setOUForBook(cur, book, line, selection, odds) {
+  if (!book) return;
+  const b = normBookKey(book);
+  const entry = cur.ouMap.get(b) || { line:'', over:null, under:null };
+  entry.line = line || entry.line || '';
+  const sel = (selection||'').toLowerCase();
+  if (sel==='over') entry.over = odds;
+  if (sel==='under') entry.under = odds;
+  cur.ouMap.set(b, entry);
+  cur.books.add(b);
+}
+
+function setAHForBook(cur, book, line, selection, odds) {
+  if (!book) return;
+  const b = normBookKey(book);
+  const entry = cur.ahMap.get(b) || { line:'', home:null, away:null };
+  entry.line = line || entry.line || '';
+  const sel = (selection||'').toLowerCase();
+  if (sel==='home') entry.home = odds;
+  if (sel==='away') entry.away = odds;
+  cur.ahMap.set(b, entry);
+  cur.books.add(b);
+}
+
+function updateMarketBoard(opp) {
+  const key = getEventKey(opp);
+  const cur = ensureEventContainer(key);
 
   if (opp.league) cur.league = opp.league;
   if (opp.event_name) {
-    // 允许传“home vs away”或直接 home/away 字段
     if (opp.home && opp.away) {
       cur.home = opp.home;
       cur.away = opp.away;
@@ -337,7 +369,7 @@ function updateMarketBoard(opp) {
       if (a) cur.away = a;
     }
   }
-  if (opp.score) cur.score = opp.score;
+  if (opp.score != null) cur.score = opp.score;
 
   // 开赛时间
   const k = guessKickoffTs(opp);
@@ -347,28 +379,14 @@ function updateMarketBoard(opp) {
 
   cur.updatedAt = Date.now();
 
-  if (opp.pickA?.book) cur.books.add(normBookKey(opp.pickA.book));
-  if (opp.pickB?.book) cur.books.add(normBookKey(opp.pickB.book));
-
+  const lineText = opp.line_text || (opp.line_numeric?.toString()||'');
   if (opp.market==='ou') {
-    cur.ou.line = opp.line_text || (opp.line_numeric?.toString()||'');
-    if ((opp.pickA?.selection||'').toLowerCase()==='over') {
-      cur.ou.over = { book:normBookKey(opp.pickA.book), odds: opp.pickA.odds };
-    }
-    if ((opp.pickB?.selection||'').toLowerCase()==='under') {
-      cur.ou.under = { book:normBookKey(opp.pickB.book), odds: opp.pickB.odds };
-    }
+    if (opp.pickA) setOUForBook(cur, opp.pickA.book, lineText, opp.pickA.selection, opp.pickA.odds);
+    if (opp.pickB) setOUForBook(cur, opp.pickB.book, lineText, opp.pickB.selection, opp.pickB.odds);
   } else if (opp.market==='ah') {
-    cur.ah.line = opp.line_text || (opp.line_numeric?.toString()||'');
-    if ((opp.pickA?.selection||'').toLowerCase()==='home') {
-      cur.ah.home = { book:normBookKey(opp.pickA.book), odds: opp.pickA.odds };
-    }
-    if ((opp.pickB?.selection||'').toLowerCase()==='away') {
-      cur.ah.away = { book:normBookKey(opp.pickB.book), odds: opp.pickB.odds };
-    }
+    if (opp.pickA) setAHForBook(cur, opp.pickA.book, lineText, opp.pickA.selection, opp.pickA.odds);
+    if (opp.pickB) setAHForBook(cur, opp.pickB.book, lineText, opp.pickB.selection, opp.pickB.odds);
   }
-
-  marketBoard.set(key, cur);
 }
 
 function calculateArbitrage(opp) {
@@ -378,8 +396,10 @@ function calculateArbitrage(opp) {
   const bookB = normBookKey(opp.pickB.book);
   const aBook  = normBookKey(settings.stake?.aBook||'');
 
-  // 只计算勾选书商
-  if (!settings.books[bookA] || !settings.books[bookB]) return null;
+  // 只计算勾选书商（未显式 false 都算启用）
+  const enabledA = settings.books[bookA] !== false;
+  const enabledB = settings.books[bookB] !== false;
+  if (!enabledA || !enabledB) return null;
 
   let pickA, pickB, sideA, sideB, aInvolved=false;
   if (bookA===aBook) {
@@ -513,40 +533,57 @@ function clearArbitrageTable() {
   if (tbody) tbody.innerHTML = `<tr class="no-data"><td colspan="8">暂无数据</td></tr>`;
 }
 
+/* 按当前盘口数据“重新配对重算” */
 function recalculateAllArbitrageOpportunities() {
   const tbody = document.querySelector('#arbitrageTable tbody');
   if (!tbody) return;
   clearArbitrageTable();
+
   marketBoard.forEach((data, eventId) => {
-    if (data.ou.line && data.ou.over && data.ou.under) {
-      const opp = {
-        event_id: eventId,
-        event_name: `${data.home} vs ${data.away}`,
-        league: data.league,
-        market: 'ou',
-        line_text: data.ou.line,
-        line_numeric: parseFloat(data.ou.line)||0,
-        pickA: { book:data.ou.over.book, selection:'over', odds: data.ou.over.odds },
-        pickB: { book:data.ou.under.book, selection:'under', odds: data.ou.under.odds },
-        score: data.score
-      };
-      const r = calculateArbitrage(opp);
-      if (r) addArbitrageOpportunity(r,false);
+    // OU：over 书商 × under 书商
+    const ouEntries = Array.from(data.ouMap.entries()); // [book, {line, over, under}]
+    for (const [bOver, eOver] of ouEntries) {
+      for (const [bUnder, eUnder] of ouEntries) {
+        if (bOver === bUnder) continue;
+        if (eOver?.over && eUnder?.under) {
+          const opp = {
+            event_id: eventId,
+            event_name: `${data.home} vs ${data.away}`,
+            league: data.league,
+            market: 'ou',
+            line_text: eOver.line || eUnder.line || '',
+            line_numeric: parseFloat(eOver.line||eUnder.line)||0,
+            pickA: { book:bOver,  selection:'over',  odds: eOver.over  },
+            pickB: { book:bUnder, selection:'under', odds: eUnder.under },
+            score: data.score
+          };
+          const r = calculateArbitrage(opp);
+          if (r) addArbitrageOpportunity(r,false);
+        }
+      }
     }
-    if (data.ah.line && data.ah.home && data.ah.away) {
-      const opp = {
-        event_id: eventId,
-        event_name: `${data.home} vs ${data.away}`,
-        league: data.league,
-        market: 'ah',
-        line_text: data.ah.line,
-        line_numeric: parseFloat(data.ah.line)||0,
-        pickA: { book:data.ah.home.book, selection:'home', odds: data.ah.home.odds },
-        pickB: { book:data.ah.away.book, selection:'away', odds: data.ah.away.odds },
-        score: data.score
-      };
-      const r = calculateArbitrage(opp);
-      if (r) addArbitrageOpportunity(r,false);
+
+    // AH：home 书商 × away 书商
+    const ahEntries = Array.from(data.ahMap.entries()); // [book, {line, home, away}]
+    for (const [bHome, eHome] of ahEntries) {
+      for (const [bAway, eAway] of ahEntries) {
+        if (bHome === bAway) continue;
+        if (eHome?.home && eAway?.away) {
+          const opp = {
+            event_id: eventId,
+            event_name: `${data.home} vs ${data.away}`,
+            league: data.league,
+            market: 'ah',
+            line_text: eHome.line || eAway.line || '',
+            line_numeric: parseFloat(eHome.line||eAway.line)||0,
+            pickA: { book:bHome, selection:'home', odds: eHome.home },
+            pickB: { book:bAway, selection:'away', odds: eAway.away },
+            score: data.score
+          };
+          const r = calculateArbitrage(opp);
+          if (r) addArbitrageOpportunity(r,false);
+        }
+      }
     }
   });
 }
@@ -564,9 +601,7 @@ function sendAlert(result) {
   const teams      = opp.event_name || '';
   const sA         = settings.stake?.amountA || 10000;
 
-  // 标题带上联赛与球队
   const title = `套利机会 · ${league} · ${teams}`;
-  // 用 <br> 强制换行，避免样式依赖
   const msg =
     `盘口：${marketText} ${lineText}<br>` +
     `A 水位：${result.waterA}（固定 ${sA.toLocaleString()}）<br>` +
@@ -627,11 +662,9 @@ function renderMarketBoard() {
     return;
   }
 
-  // 当前启用书商集合
+  // 当前启用书商：未显式 false 都算启用
   const enabled = new Set(
-    Object.entries(settings.books)
-      .filter(([,v]) => !!v)
-      .map(([k]) => normBookKey(k))
+    Array.from(discoveredBooks).filter(b => settings.books[b] !== false).map(b=>normBookKey(b))
   );
 
   // 拆分：一行一个书商
@@ -644,6 +677,9 @@ function renderMarketBoard() {
       const rk = rowKey(eventId, book);
       if (!rowOrder.has(rk)) rowOrder.set(rk, ++rowSeq);
 
+      const ouE = data.ouMap.get(book);
+      const ahE = data.ahMap.get(book);
+
       rows.push({
         rk,
         stable: rowOrder.get(rk),
@@ -652,8 +688,8 @@ function renderMarketBoard() {
         home: data.home || '',
         away: data.away || '',
         score: data.score || '',
-        ouText: data.ou.line ? `${data.ou.line} (${data.ou.over ? data.ou.over.odds : '-'}/${data.ou.under ? data.ou.under.odds : '-'})` : '-',
-        ahText: data.ah.line ? `${data.ah.line} (${data.ah.home ? data.ah.home.odds : '-'}/${data.ah.away ? data.ah.away.odds : '-'})` : '-',
+        ouText: ouE ? `${ouE.line||''} (${ouE.over ?? '-'} / ${ouE.under ?? '-'})` : '-',
+        ahText: ahE ? `${ahE.line||''} (${ahE.home ?? '-'} / ${ahE.away ?? '-'})` : '-',
         kickoffAt: data.kickoffAt || 0,
         updatedAt: data.updatedAt || 0
       });
@@ -864,8 +900,9 @@ function renderBookList() {
   sorted.forEach(book => {
     const item = document.createElement('div'); item.className='book-item';
     const id = `chk-book-${book}`;
+    const checked = settings.books[book] !== false; // 未显式 false，都算选中
     item.innerHTML = `
-      <input type="checkbox" id="${id}" ${settings.books[book] ? 'checked' : ''}>
+      <input type="checkbox" id="${id}" ${checked ? 'checked' : ''}>
       <label for="${id}">${book.charAt(0).toUpperCase()+book.slice(1)}</label>
     `;
     const chk = item.querySelector('input');
@@ -875,13 +912,13 @@ function renderBookList() {
       // A 平台自动校正
       const currentABook = normBookKey(settings.stake?.aBook||'');
       if (!chk.checked && currentABook===book) {
-        const enabled = Object.entries(settings.books).filter(([,v])=>v).map(([k])=>k);
+        const enabled = Array.from(discoveredBooks).filter(b => settings.books[b] !== false);
         settings.stake.aBook = enabled[0] || '';
         updateABookOptions();
       }
       renderRebateSettings();
-      renderMarketBoard(); // 立即按勾选过滤盘口总览
-      recalculateAllArbitrageOpportunities(); // 重新计算套利
+      renderMarketBoard();
+      recalculateAllArbitrageOpportunities();
     });
     container.appendChild(item);
   });
@@ -896,7 +933,8 @@ function renderRebateSettings() {
     container.innerHTML = '<div class="no-books-message">暂无书商数据</div>';
     return;
   }
-  const enabled = Array.from(discoveredBooks).filter(b => !!settings.books[b]).sort();
+  // 未显式 false 都显示
+  const enabled = Array.from(discoveredBooks).filter(b => settings.books[b] !== false).sort();
   if (enabled.length===0) {
     container.innerHTML = '<div class="no-books-message">请先选择书商</div>';
     return;
@@ -942,10 +980,10 @@ function renderRebateSettings() {
 function updateABookOptions() {
   const sel = document.getElementById('a-book');
   if (!sel) return;
-  const val = sel.value;
+  const prev = sel.value;
   sel.innerHTML = '';
 
-  const enabled = Array.from(discoveredBooks).filter(b=>!!settings.books[b]).sort();
+  const enabled = Array.from(discoveredBooks).filter(b=>settings.books[b] !== false).sort();
   if (enabled.length===0) {
     const opt = document.createElement('option');
     opt.value=''; opt.textContent='请先选择书商'; opt.disabled=true;
@@ -958,8 +996,8 @@ function updateABookOptions() {
     sel.appendChild(opt);
   });
 
-  if (enabled.includes(val)) {
-    sel.value = val;
+  if (enabled.includes(prev)) {
+    sel.value = prev;
   } else {
     sel.value = enabled[0];
     settings.stake.aBook = enabled[0];
