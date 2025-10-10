@@ -1,3 +1,4 @@
+
 /* =======================================================
    arb-monitor — public/app.js
    完整版（直接替换）
@@ -264,46 +265,206 @@ function stopHeartbeatMonitor() {
   if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer=null; }
 }
 
-/* ------------------ 消息处理 ------------------ */
+/* ------------------ 消息处理（新增兼容层） ------------------ */
+
+/** 小工具：安全数字 */
+function _num(v) {
+  const n = (typeof v === 'string') ? parseFloat(v) : Number(v);
+  return Number.isFinite(n) ? n : undefined;
+}
+/** 小工具：提字符串 */
+function _str(v) {
+  if (v == null) return '';
+  return (typeof v === 'string') ? v : String(v);
+}
+/** 小工具：取对象第一个存在的字段 */
+function _pick(obj, keys, fallback) {
+  for (const k of keys) {
+    if (obj && obj[k] != null && obj[k] !== '') return obj[k];
+  }
+  return fallback;
+}
+
+const _OU_ALIASES = new Set(['ou','o/u','totals','total','大小','大小球','大/小','daxiao']);
+const _AH_ALIASES = new Set(['ah','hdp','handicap','让球','让盘','让分','亚洲盘','亚洲让球']);
+const _OVER_ALIASES  = new Set(['over','o','大','大球','overline','overbet']);
+const _UNDER_ALIASES = new Set(['under','u','小','小球','underline','underbet']);
+const _HOME_ALIASES  = new Set(['home','h','主','主队','1']);
+const _AWAY_ALIASES  = new Set(['away','a','客','客队','2']);
+
+/** 规格化 selection -> 'over'/'under'/'home'/'away' */
+function _normSel(s) {
+  const t = _str(s).trim().toLowerCase();
+  if (_OVER_ALIASES.has(t))  return 'over';
+  if (_UNDER_ALIASES.has(t)) return 'under';
+  if (_HOME_ALIASES.has(t))  return 'home';
+  if (_AWAY_ALIASES.has(t))  return 'away';
+  return t;
+}
+
+/** 规格化 market -> 'ou'/'ah' */
+function _normMarket(m, pickA, pickB) {
+  let t = _str(m).trim().toLowerCase();
+
+  if (_OU_ALIASES.has(t)) return 'ou';
+  if (_AH_ALIASES.has(t)) return 'ah';
+
+  // 通过选择推断
+  const sa = _normSel(pickA?.selection);
+  const sb = _normSel(pickB?.selection);
+  if ((sa === 'over' && sb === 'under') || (sa === 'under' && sb === 'over')) return 'ou';
+  if ((sa === 'home' && sb === 'away') || (sa === 'away' && sb === 'home')) return 'ah';
+
+  // 看字段名
+  const ms = _str(m).toLowerCase();
+  if (ms.includes('handicap') || ms.includes('让')) return 'ah';
+  if (ms.includes('total')    || ms.includes('大小')) return 'ou';
+
+  return 'ou';
+}
+
+/** 规格化一条机会 Opp（把“后端各种形状”捏成前端识别的 Opp 结构） */
+function _normalizeOpp(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+
+  // 事件/联赛
+  const league = _str(_pick(raw, ['league','leagueName','league_name','league_cn','联赛','联赛名'], ''));
+  const home   = _str(_pick(raw, ['home','homeTeam','home_name','主队','team_a'], ''));
+  const away   = _str(_pick(raw, ['away','awayTeam','away_name','客队','team_b'], ''));
+  const eventName = _str(_pick(raw, ['event_name','eventName','赛事','比赛','match_name'], (home && away) ? `${home} vs ${away}` : ''));
+
+  // 盘口线
+  const lineText = _str(_pick(raw, ['line_text','lineText','line','handicap','ah','ou','total','盘口','大小'], ''));
+  const lineNum  = _num(_pick(raw, ['line_numeric','lineNum','lineValue','total_points','handicap_value'], undefined));
+
+  // 赔率来源
+  const overOdds  = _num(_pick(raw, ['over_odds','o_odds','odds_over','overOdds'], undefined));
+  const underOdds = _num(_pick(raw, ['under_odds','u_odds','odds_under','underOdds'], undefined));
+  const homeOdds  = _num(_pick(raw, ['home_odds','h_odds','odds_home','odds1','homeOdds'], undefined));
+  const awayOdds  = _num(_pick(raw, ['away_odds','a_odds','odds_away','odds2','awayOdds'], undefined));
+  const oddsA     = _num(_pick(raw, ['oddsA','odds_a','pickA_odds','aOdds'], undefined));
+  const oddsB     = _num(_pick(raw, ['oddsB','odds_b','pickB_odds','bOdds'], undefined));
+
+  // 选择/书商
+  let selA = _normSel(_pick(raw, ['selA','selectionA','pickA_sel','pickA_selection','selection_a'], ''));
+  let selB = _normSel(_pick(raw, ['selB','selectionB','pickB_sel','pickB_selection','selection_b'], ''));
+  let bookA = _str(_pick(raw, ['bookA','book_a','pickA_book','bookNameA','a_book','aBook','book1'], ''));
+  let bookB = _str(_pick(raw, ['bookB','book_b','pickB_book','bookNameB','b_book','bBook','book2'], ''));
+  bookA = bookA.toLowerCase(); bookB = bookB.toLowerCase();
+
+  // 组装 pick
+  let pickA, pickB;
+  if (overOdds && underOdds) {
+    // OU
+    if (!selA) selA = 'over';
+    if (!selB) selB = 'under';
+    pickA = { book: bookA || 'bookA', selection: selA, odds: overOdds };
+    pickB = { book: bookB || 'bookB', selection: selB, odds: underOdds };
+  } else if (homeOdds && awayOdds) {
+    // AH
+    if (!selA) selA = 'home';
+    if (!selB) selB = 'away';
+    pickA = { book: bookA || 'bookA', selection: selA, odds: homeOdds };
+    pickB = { book: bookB || 'bookB', selection: selB, odds: awayOdds };
+  } else if (oddsA && oddsB && selA && selB) {
+    pickA = { book: bookA || 'bookA', selection: selA, odds: oddsA };
+    pickB = { book: bookB || 'bookB', selection: selB, odds: oddsB };
+  }
+
+  // 从数组/picks 兜底
+  if (!pickA || !pickB) {
+    const picks = _pick(raw, ['picks','quotes','markets','legs'], []);
+    if (Array.isArray(picks) && picks.length >= 2) {
+      const p1 = picks[0] || {}, p2 = picks[1] || {};
+      pickA = { book: _str(p1.book||p1.bk||'bookA').toLowerCase(), selection: _normSel(p1.selection||p1.sel), odds: _num(p1.odds) };
+      pickB = { book: _str(p2.book||p2.bk||'bookB').toLowerCase(), selection: _normSel(p2.selection||p2.sel), odds: _num(p2.odds) };
+    }
+  }
+
+  if (!pickA || !pickB) return null;
+  if (!(pickA.odds > 1 && pickB.odds > 1)) return null;
+
+  // 市场
+  let market = _normMarket(_pick(raw, ['market','market_type','mkt','type','玩法'], ''), pickA, pickB);
+
+  // event id
+  const eventId = _pick(raw, ['event_id','eventId','match_id','fid','mid','id'], `${home}-${away}-${lineText}`);
+
+  return {
+    event_id: eventId,
+    event_name: eventName,
+    league,
+    score: _str(_pick(raw, ['score','sc','比分'], '')),
+    market,                    // 'ou' or 'ah'
+    line_text: lineText || (lineNum!=null ? String(lineNum) : ''),
+    line_numeric: (lineNum!=null ? lineNum : undefined),
+    pickA,
+    pickB,
+    // 透传：kickoff 之类时间字段，用于你现有的 guessKickoffTs
+    kickoffAt: _pick(raw, ['kickoffAt','kickoff_at','kickoff','matchTime','match_time','start_time','start_ts','startTime'], undefined)
+  };
+}
+
+/** 规格化“外层消息” -> {type:'snapshot'|'opportunity'|'heartbeat', data?, ts?} */
+function _normalizeMessage(message) {
+  if (!message) return null;
+
+  // 直接数组 => 快照
+  if (Array.isArray(message)) {
+    return { type: 'snapshot', data: message.map(_normalizeOpp).filter(Boolean), ts: Date.now() };
+  }
+
+  let type = _str(message.type).toLowerCase();
+  const ts  = message.ts || Date.now();
+
+  if (!type || type === 'ping' || type === 'hello') return { type: 'heartbeat', ts };
+  if (type === 'heartbeat') return { type:'heartbeat', ts };
+
+  if (['snapshot','full','list'].includes(type)) {
+    const list = _pick(message, ['data','opps','items','list'], []);
+    const opps = Array.isArray(list) ? list.map(_normalizeOpp).filter(Boolean) : [];
+    return { type: 'snapshot', data: opps, ts };
+  }
+
+  if (['opportunity','delta','change','upd','update'].includes(type)) {
+    const raw = _pick(message, ['data','opp','item','record'], null);
+    const opp = _normalizeOpp(raw);
+    if (!opp) return { type:'heartbeat', ts };
+    return { type: 'opportunity', data: opp, ts };
+  }
+
+  // 兜底
+  const list = _pick(message, ['data','opps','items','list'], null);
+  if (Array.isArray(list)) {
+    return { type: 'snapshot', data: list.map(_normalizeOpp).filter(Boolean), ts };
+  }
+  return null;
+}
+
+/** 改造后的消息入口：统一先规范化，再走原有逻辑 */
 function handleWebSocketMessage(message) {
-  switch (message.type) {
+  const m = _normalizeMessage(message);
+  if (!m) return;
+
+  switch (m.type) {
     case 'heartbeat':
-      lastHeartbeat = message.ts || Date.now();
+      lastHeartbeat = m.ts || Date.now();
       updateLastUpdateTime();
       break;
+
     case 'snapshot':
-      handleSnapshot(message.data || []);
+      handleSnapshot(m.data || []);
       updateLastUpdateTime();
       break;
+
     case 'opportunity':
-      handleOpportunity(message.data);
+      handleOpportunity(m.data);
       updateLastUpdateTime();
       break;
+
     default:
-      console.warn('未知消息类型:', message.type);
+      console.warn('未知消息（已规范化但不支持）:', m);
   }
-}
-
-function handleSnapshot(opps) {
-  console.log('收到快照:', opps.length,'条');
-  marketBoard.clear();
-  clearArbitrageTable();
-  clearDiscoveredBooks();
-
-  for (const opp of opps) {
-    if (opp?.pickA?.book) addDiscoveredBook(opp.pickA.book);
-    if (opp?.pickB?.book) addDiscoveredBook(opp.pickB.book);
-    processOpportunity(opp, false);
-  }
-  renderMarketBoard();
-}
-
-function handleOpportunity(opp) {
-  if (!opp) return;
-  if (opp?.pickA?.book) addDiscoveredBook(opp.pickA.book);
-  if (opp?.pickB?.book) addDiscoveredBook(opp.pickB.book);
-  processOpportunity(opp, true);
-  renderMarketBoard();
 }
 
 /* ------------------ 盘口 & 套利计算 ------------------ */
