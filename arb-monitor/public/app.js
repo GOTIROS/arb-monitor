@@ -13,16 +13,16 @@ let heartbeatTimer = null;
 
 let settings = {};
 let marketBoard = new Map();       // eventKey -> {league, home, away, score, books:Set, ouMap:Map, ahMap:Map, updatedAt, kickoffAt}
-let alertedSignatures = new Set(); // 已提醒的签名
 let hasUserInteracted = false;
 let discoveredBooks = new Set();   // 动态发现
-let activeToasts = new Map();      // key -> { toastEl, timer }
 
-// 语音解锁增强
-let pendingBeeps = 0;      // 等待播放的提示音次数
-let soundHintShown = false; // 提示“点击启用声音”只出现一次
+// 声音 & Toast 管理
+let pendingBeeps = 0;       // 等待播放的提示音次数（未解锁音频时排队）
+let soundHintShown = false; // “点击以启用声音”提示仅一次
+const alertMemory = new Map(); // sig -> { lastProfit, lastAt }
+const ALERT_TTL_MS = 15000;    // 软去重窗口：15s
 
-// 排序 & 稳定行序
+// 排序 & 稳定行序（用于行情总览，不影响套利表）
 let sortMode = 'time'; // 'time' | 'league'
 const rowOrder = new Map(); // key: eventKey|book -> stable index
 let rowSeq = 0;
@@ -79,9 +79,9 @@ const DEFAULT_SETTINGS = {
   datasource: { wsMode:'auto', wsUrl:'', token:'', useMock:false },
   books: {},
   rebates: {},                   // 旧字段保留
-  rebateA: { book:'', rate:0 },  // A 平台
+  rebateA: { book:'', rate:0 },  // A 平台（书商+返水）
   rebateB: { book:'', rate:0 },  // B 平台
-  stake: { aBook:'', amountA:10000, minProfit:0 },
+  stake: { aBook:'', amountA:10000, minProfit:0 }, // 投注设置里的 A 平台、固定额等
   notify: { systemEnabled:false, soundEnabled:true, toastEnabled:true, toastDurationS:5, autoHideRowS:30 }
 };
 
@@ -436,7 +436,7 @@ function getRebateRateForBook(bookKey){
   return 0;
 }
 
-/* —— 判断是否为“返水设置中的 A/B 平台互相对碰” —— */
+/* —— 是否“返水设置中的 A/B 平台互相对碰” —— */
 function isABPairOpp(opp){
   const a = (settings.rebateA?.book || '').toLowerCase();
   const b = (settings.rebateB?.book || '').toLowerCase();
@@ -446,7 +446,7 @@ function isABPairOpp(opp){
   return (x===a && y===b) || (x===b && y===a);
 }
 
-/* 计算套利（仅当机会是 A/B 平台对碰时才触发提醒） */
+/* 计算套利（提醒只在 A/B 对碰时触发；表格也仅显示 A/B 对碰） */
 function calculateArbitrage(opp){
   if (!opp?.pickA || !opp?.pickB) return null;
 
@@ -460,6 +460,7 @@ function calculateArbitrage(opp){
     ((bookA===rebateABook && bookB===rebateBBook) ||
      (bookA===rebateBBook && bookB===rebateABook));
 
+  // 下注侧 A 的确定：沿用“投注设置”的 A 平台（固定金额）
   let pickA, pickB, sideA, sideB;
   if (bookA===aBook){ pickA=opp.pickA; pickB=opp.pickB; sideA='A'; sideB='B'; }
   else if (bookB===aBook){ pickA=opp.pickB; pickB=opp.pickA; sideA='B'; sideB='A'; }
@@ -481,56 +482,79 @@ function calculateArbitrage(opp){
     waterA:(oA-1).toFixed(3), waterB:(oB-1).toFixed(3),
     stakeB:Math.round(sB), profit:Math.round(profit),
     shouldAlert:(isABPair && profit>=minProfit),
-    signature: generateSignature(opp)
+    signature: generateSignature(opp, pickA, pickB, profit) // 包含赔率/盈利，配合软去重
   };
 }
-function generateSignature(opp){
-  const books = [`${opp.pickA?.book||''}_${opp.pickA?.selection||''}`, `${opp.pickB?.book||''}_${opp.pickB?.selection||''}`].sort();
-  return `${getEventKey(opp)}_${opp.market}_${opp.line_text||opp.line_numeric||''}_${books.join('_')}`;
+function generateSignature(opp, pickA, pickB, profit){
+  // 为了“新变化就可再次提醒”，把赔率和盈利纳入签名的可变部分
+  const a = `${normBookKey(pickA?.book||'')}_${pickA?.selection||''}_${Math.round((+pickA?.odds||0)*1000)}`;
+  const b = `${normBookKey(pickB?.book||'')}_${pickB?.selection||''}_${Math.round((+pickB?.odds||0)*1000)}`;
+  const base = `${getEventKey(opp)}_${opp.market}_${opp.line_text||opp.line_numeric||''}`;
+  return `${base}__${[a,b].sort().join('__')}__p${profit}`;
 }
 
-/* ------- 显示上的 A/B 归位 ------- */
+/* ------- 显示上的 A/B 归位（优先返水 A/B；兜底用“投注设置”的 A 平台） ------- */
 function picksForABDisplay(opp){
-  const aBook = normBookKey(settings.rebateA?.book||'');
-  const bBook = normBookKey(settings.rebateB?.book||'');
-  let pickForA = null, pickForB = null;
-  if (aBook){
-    if (normBookKey(opp.pickA.book)===aBook) pickForA = opp.pickA;
-    else if (normBookKey(opp.pickB.book)===aBook) pickForA = opp.pickB;
+  const aRebate = normBookKey(settings.rebateA?.book||'');
+  const bRebate = normBookKey(settings.rebateB?.book||'');
+  const aStake  = normBookKey(settings.stake?.aBook||'');
+
+  // 优先使用返水 A/B 的明确映射
+  if (aRebate || bRebate){
+    let pickForA=null, pickForB=null;
+    if (aRebate){
+      if (normBookKey(opp.pickA.book)===aRebate) pickForA=opp.pickA;
+      else if (normBookKey(opp.pickB.book)===aRebate) pickForA=opp.pickB;
+    }
+    if (bRebate){
+      if (normBookKey(opp.pickA.book)===bRebate) pickForB=opp.pickA;
+      else if (normBookKey(opp.pickB.book)===bRebate) pickForB=opp.pickB;
+    }
+    if (!pickForA || !pickForB){
+      // 万一只配了其中一个，另一个用对手作兜底
+      const other = (pickForA && pickForA===opp.pickA) ? opp.pickB
+                   : (pickForA && pickForA===opp.pickB) ? opp.pickA
+                   : (pickForB && pickForB===opp.pickA) ? opp.pickB
+                   : (pickForB && pickForB===opp.pickB) ? opp.pickA : null;
+      if (!pickForA) pickForA = other || opp.pickA;
+      if (!pickForB) pickForB = (other===opp.pickA?opp.pickB:opp.pickA);
+    }
+    return { pickForA, pickForB };
   }
-  if (bBook){
-    if (normBookKey(opp.pickA.book)===bBook) pickForB = opp.pickA;
-    else if (normBookKey(opp.pickB.book)===bBook) pickForB = opp.pickB;
+
+  // 兜底：未配置返水 A/B 时，用“投注设置”的 A 平台标记 A，其余为 B
+  if (aStake){
+    const pickForA = normBookKey(opp.pickA.book)===aStake ? opp.pickA
+                    : normBookKey(opp.pickB.book)===aStake ? opp.pickB : opp.pickA;
+    const pickForB = (pickForA===opp.pickA) ? opp.pickB : opp.pickA;
+    return { pickForA, pickForB };
   }
-  if (!pickForA) pickForA = opp.pickA;
-  if (!pickForB) pickForB = opp.pickB;
-  return { pickForA, pickForB };
+
+  // 再兜底：按原始顺序
+  return { pickForA:opp.pickA, pickForB:opp.pickB };
 }
 
 /* ------------------ 套利表格 ------------------ */
 function addArbitrageOpportunity(result, shouldAlert){
-  // 仅 A/B 平台对碰的机会才进入表格与弹窗逻辑
+  // 仅 A/B 对碰的机会才进入表格与弹窗逻辑
   if (!isABPairOpp(result.opportunity)) return;
 
   const tbody=document.querySelector('#arbitrageTable tbody');
   const sig=result.signature, minProfit=parseInt(settings.stake?.minProfit)||0;
-
-  const existed=tbody.querySelector(`tr[data-signature="${sig}"]`);
-  if (existed){
-    if (result.profit<minProfit){ existed.remove(); alertedSignatures.delete(sig); ensureNoDataRow(); return; }
-    updateArbitrageRow(existed,result);
-    if (shouldAlert && result.shouldAlert) highlightRow(existed);
-    return;
-  }
-
   if (result.profit<minProfit) return;
+
+  // 若已存在同签名行：删除旧行，重新插入到最上面（确保“最新置顶”）
+  const existed=tbody.querySelector(`tr[data-signature="${CSS.escape(sig)}"]`);
+  if (existed) existed.remove();
+
+  // 移除“暂无数据”
   const noData=tbody.querySelector('.no-data'); if (noData) noData.remove();
 
   const row=createArbitrageRow(result);
-  // 新增行也放在最上面（可视效果更像“提醒置顶”）
+  // 最新插最上
   tbody.insertBefore(row, tbody.firstChild);
 
-  // 不再依赖 shouldAlert；AB 对碰行统一按设定秒数自动隐藏
+  // 无条件设置自动隐藏（即使不弹窗也会隐藏）
   const hideS = parseInt(settings.notify?.autoHideRowS) || 0;
   if (hideS > 0) {
     setTimeout(() => {
@@ -538,10 +562,8 @@ function addArbitrageOpportunity(result, shouldAlert){
     }, hideS * 1000);
   }
 
-  if (result.shouldAlert && shouldAlert){
-    highlightRow(row);
-    sendAlert(result);
-  }
+  // 软去重：在允许范围内弹窗 + 声音
+  if (shouldAlert) sendAlert(result);
 }
 function ensureNoDataRow(){
   const tbody=document.querySelector('#arbitrageTable tbody');
@@ -570,22 +592,6 @@ function createArbitrageRow(result){
     <td>${result.profit.toLocaleString()}</td>`;
   return row;
 }
-function updateArbitrageRow(row,result){
-  const c=row.cells; if (c.length<8) return;
-  const opp=result.opportunity;
-  const { pickForA, pickForB } = picksForABDisplay(opp);
-  const waterAForDisplay = (parseFloat(pickForA.odds)-1).toFixed(3);
-  const waterBForDisplay = (parseFloat(pickForB.odds)-1).toFixed(3);
-
-  c[2].textContent = `${prettyBook(pickForA.book)}（${zhSel(pickForA.selection)}）`;
-  c[3].textContent = `${prettyBook(pickForB.book)}（${zhSel(pickForB.selection)}）`;
-  c[4].textContent = waterAForDisplay;
-  c[5].textContent = waterBForDisplay;
-  c[6].textContent = result.stakeB.toLocaleString();
-  c[7].textContent = result.profit.toLocaleString();
-}
-function highlightRow(row){ row.classList.add('highlighted'); setTimeout(()=> row.classList.remove('highlighted'), 1800); }
-function clearArbitrageTable(){ const tbody=document.querySelector('#arbitrageTable tbody'); if (tbody) tbody.innerHTML=`<tr class="no-data"><td colspan="8">暂无数据</td></tr>`; }
 
 /* ------------------ 批量重算 ------------------ */
 function recalculateAllArbitrageOpportunities(){
@@ -618,6 +624,7 @@ function recalculateAllArbitrageOpportunities(){
     }
   });
 }
+function clearArbitrageTable(){ const tbody=document.querySelector('#arbitrageTable tbody'); if (tbody) tbody.innerHTML=`<tr class="no-data"><td colspan="8">暂无数据</td></tr>`; }
 
 /* ------------------ 提醒（Toast） ------------------ */
 function ensureAlertStyles(){
@@ -643,7 +650,7 @@ function ensureToastStack(){
     stack.id = 'toast-stack';
     document.body.appendChild(stack);
   }
-  // 关键样式兜底
+  // 关键样式兜底（避免滚动时隐藏）
   const s = stack.style;
   s.position = 'fixed'; s.top = '16px'; s.right = '16px';
   s.zIndex = '2147483647'; s.display = 'flex'; s.flexDirection = 'column'; s.gap = '10px'; s.pointerEvents='none';
@@ -652,59 +659,61 @@ function ensureToastStack(){
 function showToast(title, message, type='info'){
   ensureAlertStyles();
   const stack = ensureToastStack();
-
   const el = document.createElement('div');
   el.className = `toast ${type}`;
   el.innerHTML = `
     <div class="toast-title">${title}</div>
     <div class="toast-message">${message}</div>
   `;
-
-  // 强制最新置顶
+  // 最新置顶
   stack.prepend(el);
-
   const duration = (settings.notify?.toastDurationS||5)*1000;
-  setTimeout(()=> {
-    el.classList.add('removing');
-    setTimeout(()=> el.remove(), 200);
-  }, duration);
+  setTimeout(()=> { el.classList.add('removing'); setTimeout(()=> el.remove(), 200); }, duration);
 }
 function sendAlert(result){
   // 仅 A/B 对碰才弹
   if (!isABPairOpp(result.opportunity)) return;
-  const sig=result.signature; if (alertedSignatures.has(sig)) return; alertedSignatures.add(sig);
 
-  const opp=result.opportunity;
-  const marketText=zhMarket(opp.market);
-  const lineText=opp.line_text||(opp.line_numeric?.toString()||'');
-  const { pickForA, pickForB } = picksForABDisplay(opp);
-  const pickAStr = `${prettyBook(pickForA.book)}（${zhSel(pickForA.selection)}）`;
-  const pickBStr = `${prettyBook(pickForB.book)}（${zhSel(pickForB.selection)}）`;
-  const sA=settings.stake?.amountA||10000;
+  const sig=result.signature;
+  const now=Date.now();
+  const mem=alertMemory.get(sig);
+  if (mem && (now - mem.lastAt < ALERT_TTL_MS) && mem.lastProfit === result.profit) {
+    // 15s 内且盈利未变：跳过
+  } else {
+    alertMemory.set(sig, { lastProfit: result.profit, lastAt: now });
 
-  const title=`套利机会 · ${opp.league||''} · ${opp.event_name||''}`;
-  const msg=
-    `盘口：${marketText} ${lineText}<br>`+
-    `选择A：${pickAStr}　水位：${(parseFloat(pickForA.odds)-1).toFixed(3)}（A固定 ${sA.toLocaleString()}）<br>`+
-    `选择B：${pickBStr}　水位：${(parseFloat(pickForB.odds)-1).toFixed(3)}（应下 ${result.stakeB.toLocaleString()}）<br>`+
-    `均衡盈利：${result.profit.toLocaleString()}`;
+    const opp=result.opportunity;
+    const marketText=zhMarket(opp.market);
+    const lineText=opp.line_text||(opp.line_numeric?.toString()||'');
+    const { pickForA, pickForB } = picksForABDisplay(opp);
+    const pickAStr = `${prettyBook(pickForA.book)}（${zhSel(pickForA.selection)}）`;
+    const pickBStr = `${prettyBook(pickForB.book)}（${zhSel(pickForB.selection)}）`;
+    const sA=settings.stake?.amountA||10000;
 
-  if (settings.notify?.toastEnabled) showToast(title,msg,'success');
+    const title=`套利机会 · ${opp.league||''} · ${opp.event_name||''}`;
+    const msg=
+      `盘口：${marketText} ${lineText}<br>`+
+      `选择A：${pickAStr}　水位：${(parseFloat(pickForA.odds)-1).toFixed(3)}（A固定 ${sA.toLocaleString()}）<br>`+
+      `选择B：${pickBStr}　水位：${(parseFloat(pickForB.odds)-1).toFixed(3)}（应下 ${result.stakeB.toLocaleString()}）<br>`+
+      `均衡盈利：${result.profit.toLocaleString()}`;
 
-  // 系统通知
-  if (settings.notify?.systemEnabled && 'Notification' in window && Notification.permission==='granted') {
-    new Notification(title, { body:`${marketText}${lineText}  盈利 ${result.profit.toLocaleString()}`, icon:'/favicon.ico' });
-  }
+    if (settings.notify?.toastEnabled) showToast(title,msg,'success');
 
-  // 声音：如果浏览器还未解锁音频，就排队并弹一次提示
-  if (settings.notify?.soundEnabled) {
-    if (hasUserInteracted) {
-      playNotificationSound();
-    } else {
-      pendingBeeps++;
-      if (!soundHintShown) {
-        showToast('声音提醒未启用', '请点击页面任意位置以启用声音', 'error');
-        soundHintShown = true;
+    // 系统通知
+    if (settings.notify?.systemEnabled && 'Notification' in window && Notification.permission==='granted') {
+      new Notification(title, { body:`${marketText}${lineText}  盈利 ${result.profit.toLocaleString()}`, icon:'/favicon.ico' });
+    }
+
+    // 声音：若未解锁音频，排队并提示一次
+    if (settings.notify?.soundEnabled) {
+      if (hasUserInteracted) {
+        playNotificationSound();
+      } else {
+        pendingBeeps++;
+        if (!soundHintShown) {
+          showToast('声音提醒未启用', '请点击页面任意位置以启用声音', 'error');
+          soundHintShown = true;
+        }
       }
     }
   }
@@ -723,7 +732,7 @@ function playNotificationSound(){
   }catch(_){}
 }
 
-/* ------------------ 行情总览 ------------------ */
+/* ------------------ 行情总览（不改） ------------------ */
 function renderMarketBoard(){
   const tbody=document.querySelector('#marketTable tbody'); if (!tbody) return;
   tbody.innerHTML='';
@@ -767,10 +776,10 @@ function renderMarketBoard(){
 function initUI(loaded){
   settings=loaded;
   initHamburgerMenu(); initSettingsPanels(); initMarketControls();
-  ensureAlertStyles(); ensureToastStack();          // 提醒容器 + 样式
+  ensureAlertStyles(); ensureToastStack();
   requestNotificationPermission();
 
-  // 用更多事件确保尽早解锁音频，并把排队的提示音补放
+  // 多事件尽早解锁音频，并补放排队提示音
   const enableSoundOnce = () => {
     hasUserInteracted = true;
     const n = pendingBeeps; pendingBeeps = 0;
@@ -780,7 +789,7 @@ function initUI(loaded){
     document.addEventListener(ev, enableSoundOnce, { once:true, capture:true });
   });
 
-  saveSettings();                                   // 兜底写回一次
+  saveSettings();
   window.addEventListener('beforeunload', saveSettings);
 }
 
@@ -840,9 +849,8 @@ function initSettingsPanels(){
   if (autoHideRow)  autoHideRow .addEventListener('input', ()=>{ settings.notify=settings.notify||{}; settings.notify.autoHideRowS=parseInt(autoHideRow.value)||0; saveSettings(); });
 
   if (clearAlerts) clearAlerts.addEventListener('click', ()=>{
-    // 清除提醒签名 + 清空 toast + 清空表格
-    alertedSignatures.clear();
-    const stack = ensureToastStack(); stack.innerHTML='';
+    alertMemory.clear();                     // 清软去重缓存
+    const stack = ensureToastStack(); stack.innerHTML=''; // 清 Toast
     const tbody=document.querySelector('#arbitrageTable tbody');
     if (tbody) {
       tbody.querySelectorAll('tr').forEach(tr=>{ if(!tr.classList.contains('no-data')) tr.remove(); });
@@ -873,7 +881,7 @@ function renderBookList(){
   });
 }
 
-/* A/B 返水设置（改为“实时保存”） */
+/* A/B 返水设置（即时保存） */
 function renderRebateSettings(){
   const container=document.querySelector('#panel-rebates .panel-content'); if (!container) return;
   container.innerHTML='';
@@ -940,7 +948,7 @@ function initDatasourcePanel(){
     settings.datasource.useMock = !!useMockChk.checked; saveSettings();
     if (settings.datasource.useMock) enterMockMode();
     else {
-      stopMockData(); marketBoard.clear(); clearArbitrageTable(); clearDiscoveredBooks(); renderMarketBoard(); alertedSignatures.clear();
+      stopMockData(); marketBoard.clear(); clearArbitrageTable(); clearDiscoveredBooks(); renderMarketBoard(); alertMemory.clear();
       const stack=document.getElementById('toast-stack'); if (stack) stack.innerHTML=''; reconnectNow();
     }
   };
@@ -1025,5 +1033,5 @@ function updateLastUpdateTime(){ const el=document.getElementById('lastUpdateTim
 document.addEventListener('DOMContentLoaded', ()=>{
   const loaded=loadSettings();
   initUI(loaded);
-  connectWS(); // 如果已勾选“使用模拟数据”，会直接进入模拟数据模式
+  connectWS(); // 若已勾选“使用模拟数据”，会直接进入模拟数据模式
 });
