@@ -18,8 +18,13 @@ let hasUserInteracted = false;
 let discoveredBooks = new Set();   // 动态发现
 let activeToasts = new Map();      // key -> { toastEl, timer }
 
-let sortMode = 'time';             // 'time' | 'league'
-const rowOrder = new Map();        // key: eventKey|book -> stable index
+// 语音解锁增强
+let pendingBeeps = 0;      // 等待播放的提示音次数
+let soundHintShown = false; // 提示“点击启用声音”只出现一次
+
+// 排序 & 稳定行序
+let sortMode = 'time'; // 'time' | 'league'
+const rowOrder = new Map(); // key: eventKey|book -> stable index
 let rowSeq = 0;
 
 /* ------------------ 模拟数据 ------------------ */
@@ -504,6 +509,9 @@ function picksForABDisplay(opp){
 
 /* ------------------ 套利表格 ------------------ */
 function addArbitrageOpportunity(result, shouldAlert){
+  // 仅 A/B 平台对碰的机会才进入表格与弹窗逻辑
+  if (!isABPairOpp(result.opportunity)) return;
+
   const tbody=document.querySelector('#arbitrageTable tbody');
   const sig=result.signature, minProfit=parseInt(settings.stake?.minProfit)||0;
 
@@ -514,14 +522,25 @@ function addArbitrageOpportunity(result, shouldAlert){
     if (shouldAlert && result.shouldAlert) highlightRow(existed);
     return;
   }
+
   if (result.profit<minProfit) return;
   const noData=tbody.querySelector('.no-data'); if (noData) noData.remove();
 
-  const row=createArbitrageRow(result); tbody.appendChild(row);
+  const row=createArbitrageRow(result);
+  // 新增行也放在最上面（可视效果更像“提醒置顶”）
+  tbody.insertBefore(row, tbody.firstChild);
+
+  // 不再依赖 shouldAlert；AB 对碰行统一按设定秒数自动隐藏
+  const hideS = parseInt(settings.notify?.autoHideRowS) || 0;
+  if (hideS > 0) {
+    setTimeout(() => {
+      try { row.remove(); ensureNoDataRow(); } catch(_) {}
+    }, hideS * 1000);
+  }
+
   if (result.shouldAlert && shouldAlert){
-    highlightRow(row); sendAlert(result);
-    const hideS = parseInt(settings.notify?.autoHideRowS)||0;
-    if (hideS>0) setTimeout(()=> { try{ row.remove(); ensureNoDataRow(); }catch(_){} }, hideS*1000);
+    highlightRow(row);
+    sendAlert(result);
   }
 }
 function ensureNoDataRow(){
@@ -624,7 +643,7 @@ function ensureToastStack(){
     stack.id = 'toast-stack';
     document.body.appendChild(stack);
   }
-  // 关键样式兜底（防被外部 CSS 覆盖）
+  // 关键样式兜底
   const s = stack.style;
   s.position = 'fixed'; s.top = '16px'; s.right = '16px';
   s.zIndex = '2147483647'; s.display = 'flex'; s.flexDirection = 'column'; s.gap = '10px'; s.pointerEvents='none';
@@ -633,13 +652,16 @@ function ensureToastStack(){
 function showToast(title, message, type='info'){
   ensureAlertStyles();
   const stack = ensureToastStack();
+
   const el = document.createElement('div');
   el.className = `toast ${type}`;
-  el.innerHTML = `<div class="toast-title">${title}</div><div class="toast-message">${message}</div>`;
+  el.innerHTML = `
+    <div class="toast-title">${title}</div>
+    <div class="toast-message">${message}</div>
+  `;
 
-  // 最新置顶
-  if (stack.firstElementChild) stack.insertBefore(el, stack.firstElementChild);
-  else stack.appendChild(el);
+  // 强制最新置顶
+  stack.prepend(el);
 
   const duration = (settings.notify?.toastDurationS||5)*1000;
   setTimeout(()=> {
@@ -673,8 +695,19 @@ function sendAlert(result){
   if (settings.notify?.systemEnabled && 'Notification' in window && Notification.permission==='granted') {
     new Notification(title, { body:`${marketText}${lineText}  盈利 ${result.profit.toLocaleString()}`, icon:'/favicon.ico' });
   }
-  // 声音：首次需要一次用户交互（浏览器限制）
-  if (settings.notify?.soundEnabled && hasUserInteracted) playNotificationSound();
+
+  // 声音：如果浏览器还未解锁音频，就排队并弹一次提示
+  if (settings.notify?.soundEnabled) {
+    if (hasUserInteracted) {
+      playNotificationSound();
+    } else {
+      pendingBeeps++;
+      if (!soundHintShown) {
+        showToast('声音提醒未启用', '请点击页面任意位置以启用声音', 'error');
+        soundHintShown = true;
+      }
+    }
+  }
 }
 function playNotificationSound(){
   try{
@@ -736,8 +769,17 @@ function initUI(loaded){
   initHamburgerMenu(); initSettingsPanels(); initMarketControls();
   ensureAlertStyles(); ensureToastStack();          // 提醒容器 + 样式
   requestNotificationPermission();
-  document.addEventListener('click', ()=> hasUserInteracted=true, {once:true});
-  document.addEventListener('keydown', ()=> hasUserInteracted=true, {once:true});
+
+  // 用更多事件确保尽早解锁音频，并把排队的提示音补放
+  const enableSoundOnce = () => {
+    hasUserInteracted = true;
+    const n = pendingBeeps; pendingBeeps = 0;
+    for (let i = 0; i < n; i++) playNotificationSound();
+  };
+  ['click','pointerdown','touchstart','keydown','wheel'].forEach(ev=>{
+    document.addEventListener(ev, enableSoundOnce, { once:true, capture:true });
+  });
+
   saveSettings();                                   // 兜底写回一次
   window.addEventListener('beforeunload', saveSettings);
 }
