@@ -123,11 +123,7 @@ function getEventKey(opp){ return `${opp.league || ''}|${opp.event_name || ''}`;
 
 /* ------------------ WebSocket / 模拟数据 切换 ------------------ */
 function connectWS() {
-  if (settings.datasource?.useMock) {
-    enterMockMode();
-    return;
-  }
-  // 真连 WS
+  if (settings.datasource?.useMock) { enterMockMode(); return; }
   if (ws && (ws.readyState===WebSocket.CONNECTING || ws.readyState===WebSocket.OPEN)) return;
   if (settings.datasource?.wsMode==='custom' && !(settings.datasource?.wsUrl||'').trim()) {
     updateConnectionStatus('connecting'); return;
@@ -147,7 +143,7 @@ function connectWS() {
     ws.onopen = () => { wsReconnectAttempts=0; updateConnectionStatus('connected'); startHeartbeatMonitor(); };
     ws.onmessage = (ev) => { try { handleWebSocketMessage(JSON.parse(ev.data)); } catch(e){ console.error('解析消息失败:', e); } };
     ws.onclose = () => {
-      if (settings.datasource?.useMock) return; // 模拟模式时忽略 onclose 对 UI 的影响
+      if (settings.datasource?.useMock) return;
       updateConnectionStatus('reconnecting'); stopHeartbeatMonitor(); scheduleReconnect();
     };
     ws.onerror = (err) => { console.error('WS 错误:', err); };
@@ -157,19 +153,16 @@ function connectWS() {
   }
 }
 function enterMockMode(){
-  // 退出 WS
   if (ws) { try { ws.onopen = ws.onmessage = ws.onerror = ws.onclose = null; ws.close(); } catch(_){}
     ws = null; }
   if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer=null; }
   stopHeartbeatMonitor();
 
-  // 清屏 + 注入 10 书商
   marketBoard.clear(); clearArbitrageTable(); clearDiscoveredBooks();
   MOCK_BOOKS.forEach(addDiscoveredBook);
   updateABookOptions();
   normalizeRebateABSelections();
 
-  // 立即生成一批初始盘口
   const initial = [];
   for (let i=0;i<12;i++){
     const f = rand(MOCK_FIXTURES);
@@ -193,7 +186,6 @@ function enterMockMode(){
   handleSnapshot(initial);
   updateConnectionStatus('connected');
 
-  // 持续随机推送
   stopMockData();
   mockTimer = setInterval(pushOneMock, 1500);
   showToast('模拟数据', '已启动 10 书商的随机盘口流', 'success');
@@ -409,7 +401,7 @@ function getRebateRateForBook(bookKey){
   return 0;
 }
 
-/* 计算套利 */
+/* 计算套利（仅当机会是 A/B 平台对碰时才触发提醒） */
 function calculateArbitrage(opp){
   if (!opp?.pickA || !opp?.pickB) return null;
 
@@ -417,9 +409,16 @@ function calculateArbitrage(opp){
   const bookB = normBookKey(opp.pickB.book);
   const aBook = normBookKey(settings.stake?.aBook||'');
 
-  let pickA, pickB, sideA, sideB, aInvolved=false;
-  if (bookA===aBook){ aInvolved=true; pickA=opp.pickA; pickB=opp.pickB; sideA='A'; sideB='B'; }
-  else if (bookB===aBook){ aInvolved=true; pickA=opp.pickB; pickB=opp.pickA; sideA='B'; sideB='A'; }
+  // A/B 平台（来自返水设置）
+  const rebateABook = normBookKey(settings.rebateA?.book||'');
+  const rebateBBook = normBookKey(settings.rebateB?.book||'');
+  const isABPair = rebateABook && rebateBBook &&
+    ((bookA===rebateABook && bookB===rebateBBook) ||
+     (bookA===rebateBBook && bookB===rebateABook));
+
+  let pickA, pickB, sideA, sideB;
+  if (bookA===aBook){ pickA=opp.pickA; pickB=opp.pickB; sideA='A'; sideB='B'; }
+  else if (bookB===aBook){ pickA=opp.pickB; pickB=opp.pickA; sideA='B'; sideB='A'; }
   else { pickA=opp.pickA; pickB=opp.pickB; sideA='—'; sideB='B'; }
 
   const oA=parseFloat(pickA.odds)||0, oB=parseFloat(pickB.odds)||0;
@@ -437,7 +436,8 @@ function calculateArbitrage(opp){
     opportunity: opp, sideA, sideB, pickA, pickB,
     waterA:(oA-1).toFixed(3), waterB:(oB-1).toFixed(3),
     stakeB:Math.round(sB), profit:Math.round(profit),
-    shouldAlert:(aInvolved && profit>=minProfit),
+    // 只在 A/B 平台对碰时提醒
+    shouldAlert:(isABPair && profit>=minProfit),
     signature: generateSignature(opp)
   };
 }
@@ -516,7 +516,7 @@ function updateArbitrageRow(row,result){
   c[3].textContent = `${prettyBook(pickForB.book)}（${zhSel(pickForB.selection)}）`;
   c[4].textContent = waterAForDisplay;
   c[5].textContent = waterBForDisplay;
-  c[6].textContent = result.stakeB.toLocaleString();   // 始终显示，不再是“—”
+  c[6].textContent = result.stakeB.toLocaleString();
   c[7].textContent = result.profit.toLocaleString();
 }
 function highlightRow(row){ row.classList.add('highlighted'); setTimeout(()=> row.classList.remove('highlighted'), 1800); }
@@ -557,6 +557,7 @@ function recalculateAllArbitrageOpportunities(){
 /* ------------------ 提醒（Toast） ------------------ */
 function sendAlert(result){
   const sig=result.signature; if (alertedSignatures.has(sig)) return; alertedSignatures.add(sig);
+
   const opp=result.opportunity;
   const marketText=zhMarket(opp.market);
   const lineText=opp.line_text||(opp.line_numeric?.toString()||'');
@@ -580,12 +581,20 @@ function sendAlert(result){
   if (settings.notify?.soundEnabled && hasUserInteracted) playNotificationSound();
 }
 
-/* 最新在上：如果没有容器则自动创建 */
+/* 保证容器存在 + 默认样式（右上角），并支持“最新置顶” */
 function ensureToastStack(){
   let stack = document.getElementById('toast-stack');
   if (!stack){
     stack = document.createElement('div');
     stack.id = 'toast-stack';
+    // 基础样式，防止因为没有样式导致“看不见”
+    stack.style.position = 'fixed';
+    stack.style.top = '16px';
+    stack.style.right = '16px';
+    stack.style.zIndex = '9999';
+    stack.style.display = 'flex';
+    stack.style.flexDirection = 'column';
+    stack.style.gap = '10px';
     document.body.appendChild(stack);
   }
   return stack;
@@ -598,8 +607,10 @@ function showToast(title, message, type='info'){
     <div class="toast-title">${title}</div>
     <div class="toast-message">${message}</div>
   `;
-  // 最新置顶
-  stack.insertBefore(el, stack.firstChild || null);
+  // 最新置顶（优先用 prepend；不支持时回退 insertBefore）
+  if (typeof stack.prepend === 'function') stack.prepend(el);
+  else stack.insertBefore(el, stack.firstElementChild || null);
+
   const duration = (settings.notify?.toastDurationS||5)*1000;
   setTimeout(()=> {
     el.classList.add('removing');
@@ -668,8 +679,8 @@ function initUI(loaded){
   requestNotificationPermission();
   document.addEventListener('click', ()=> hasUserInteracted=true, {once:true});
   document.addEventListener('keydown', ()=> hasUserInteracted=true, {once:true});
-  saveSettings();                                // 兜底写回一次，避免偶发丢失
-  window.addEventListener('beforeunload', saveSettings); // 刷新/关闭前再保存
+  saveSettings();                                // 兜底写回一次
+  window.addEventListener('beforeunload', saveSettings);
 }
 
 /* --- 汉堡按钮 --- */
@@ -848,7 +859,7 @@ function initDatasourcePanel(){
   });
   reconnectBtn && reconnectBtn.addEventListener('click', ()=>{ reconnectNow(); hideReconnectButton(); });
 
-  // 如果开关已经是“开”，初始化后立即进入模拟（不等事件）
+  // 开关初始为开时，立即进入模拟模式
   if (useMockChk && useMockChk.checked) {
     if (!settings.datasource.useMock) { settings.datasource.useMock = true; saveSettings(); }
     queueMicrotask(()=> enterMockMode());
