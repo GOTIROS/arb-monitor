@@ -74,7 +74,7 @@ const DEFAULT_SETTINGS = {
   datasource: { wsMode:'auto', wsUrl:'', token:'', useMock:false },
   books: {},
   rebates: {},                   // 旧字段保留
-  rebateA: { book:'', rate:0 },  // A 平台（项目二）
+  rebateA: { book:'', rate:0 },  // A 平台
   rebateB: { book:'', rate:0 },  // B 平台
   stake: { aBook:'', amountA:10000, minProfit:0 },
   notify: { systemEnabled:false, soundEnabled:true, toastEnabled:true, toastDurationS:5, autoHideRowS:30 }
@@ -152,6 +152,7 @@ function connectWS() {
     updateConnectionStatus('reconnecting'); scheduleReconnect();
   }
 }
+
 function enterMockMode(){
   if (ws) { try { ws.onopen = ws.onmessage = ws.onerror = ws.onclose = null; ws.close(); } catch(_){}
     ws = null; }
@@ -163,6 +164,7 @@ function enterMockMode(){
   updateABookOptions();
   normalizeRebateABSelections();
 
+  // 初始化快照（静默）
   const initial = [];
   for (let i=0;i<12;i++){
     const f = rand(MOCK_FIXTURES);
@@ -186,10 +188,38 @@ function enterMockMode(){
   handleSnapshot(initial);
   updateConnectionStatus('connected');
 
+  // 每 1.5 秒推送一条（会触发提醒）
   stopMockData();
   mockTimer = setInterval(pushOneMock, 1500);
+
+  // 立即强制一条 A/B 对碰的“必弹”机会（2.10/2.10）
+  emitOneABPairMock();
+
   showToast('模拟数据', '已启动 10 书商的随机盘口流', 'success');
 }
+
+function emitOneABPairMock(){
+  const a = (settings.rebateA?.book||'').toLowerCase();
+  const b = (settings.rebateB?.book||'').toLowerCase();
+  if (!a || !b) return; // 未设置 A/B 则跳过
+  const f = rand(MOCK_FIXTURES);
+  const mkt = Math.random()<0.5 ? 'ou' : 'ah';
+  const line = mkt==='ou' ? '2.5' : '0';
+  // 2.10 / 2.10 → 一定满足套利（方便你立即看到弹窗）
+  const o1 = 2.10, o2 = 2.10;
+  const opp = {
+    event_id:`ABPAIR-${Date.now()}`,
+    event_name:`${f.home} vs ${f.away}`,
+    league:f.league, market:mkt, line_text:line,
+    score:`${Math.floor(Math.random()*3)}:${Math.floor(Math.random()*3)}`,
+    kickoffAt: Date.now() + Math.floor(Math.random()*7200)*1000
+  };
+  if (mkt==='ou'){ opp.pickA={book:a,selection:'over',odds:o1}; opp.pickB={book:b,selection:'under',odds:o2}; }
+  else { opp.pickA={book:a,selection:'home',odds:o1}; opp.pickB={book:b,selection:'away',odds:o2}; }
+  processOpportunity(opp, true); // 立刻触发提醒
+  renderMarketBoard(); updateLastUpdateTime();
+}
+
 function pushOneMock(){
   const f = rand(MOCK_FIXTURES);
   const mkt = Math.random()<0.5 ? 'ou' : 'ah';
@@ -207,7 +237,8 @@ function pushOneMock(){
   };
   if (mkt==='ou'){ opp.pickA={book:b1,selection:'over',odds:o1}; opp.pickB={book:b2,selection:'under',odds:o2}; }
   else { opp.pickA={book:b1,selection:'home',odds:o1}; opp.pickB={book:b2,selection:'away',odds:o2}; }
-  processOpportunity(opp, false); renderMarketBoard(); updateLastUpdateTime();
+  processOpportunity(opp, true); // ← 这里改成 true：增量推送会弹窗
+  renderMarketBoard(); updateLastUpdateTime();
 }
 function stopMockData(){ if (mockTimer) { clearInterval(mockTimer); mockTimer=null; } }
 
@@ -419,7 +450,6 @@ function calculateArbitrage(opp){
   const bookB = normBookKey(opp.pickB.book);
   const aBook = normBookKey(settings.stake?.aBook||'');
 
-  // A/B 平台（来自返水设置）
   const rebateABook = normBookKey(settings.rebateA?.book||'');
   const rebateBBook = normBookKey(settings.rebateB?.book||'');
   const isABPair = rebateABook && rebateBBook &&
@@ -446,7 +476,6 @@ function calculateArbitrage(opp){
     opportunity: opp, sideA, sideB, pickA, pickB,
     waterA:(oA-1).toFixed(3), waterB:(oB-1).toFixed(3),
     stakeB:Math.round(sB), profit:Math.round(profit),
-    // 只在 A/B 平台对碰时提醒
     shouldAlert:(isABPair && profit>=minProfit),
     signature: generateSignature(opp)
   };
@@ -456,7 +485,7 @@ function generateSignature(opp){
   return `${getEventKey(opp)}_${opp.market}_${opp.line_text||opp.line_numeric||''}_${books.join('_')}`;
 }
 
-/* ------- 辅助：根据返水设置，把显示上的“选择A/B”映射为对应书商 ------- */
+/* ------- 显示上的 A/B 归位 ------- */
 function picksForABDisplay(opp){
   const aBook = normBookKey(settings.rebateA?.book||'');
   const bBook = normBookKey(settings.rebateB?.book||'');
@@ -594,7 +623,7 @@ function sendAlert(result){
   if (settings.notify?.soundEnabled && hasUserInteracted) playNotificationSound();
 }
 
-/* 保证容器存在 + 默认样式（右上角），并支持“最新置顶” */
+/* 保证容器存在 + 默认样式（右上角固定），并支持“最新置顶” */
 function ensureToastStack(){
   let stack = document.getElementById('toast-stack');
   if (!stack){
@@ -602,18 +631,17 @@ function ensureToastStack(){
     stack.id = 'toast-stack';
     document.body.appendChild(stack);
   }
-  // 不管是否新建，强制刷新关键样式，防止被外部 CSS 覆盖导致看起来“没置顶/没显示”
+  // 强制关键样式，避免被其它 CSS 覆盖；固定悬浮右上角，滚动不隐藏
   const s = stack.style;
   s.position = 'fixed';
   s.top = '16px';
   s.right = '16px';
-  s.zIndex = '2147483647';
+  s.zIndex = '2147483647';  // 超高，确保不被遮住
   s.display = 'flex';
-  s.flexDirection = 'column';   // 从上往下排，配合 prepend 实现“最新在最上”
+  s.flexDirection = 'column';   // 从上往下排
   s.gap = '10px';
   return stack;
 }
-
 function showToast(title, message, type='info'){
   const stack = ensureToastStack();
   const el = document.createElement('div');
@@ -622,12 +650,9 @@ function showToast(title, message, type='info'){
     <div class="toast-title">${title}</div>
     <div class="toast-message">${message}</div>
   `;
-  // 最新置顶：优先用 prepend；不支持时回退 insertBefore 到第一个元素前
-  if (typeof stack.prepend === 'function') {
-    stack.prepend(el);
-  } else {
-    stack.insertBefore(el, stack.firstElementChild || null);
-  }
+  // 最新置顶（优先用 prepend；不支持时回退 insertBefore）
+  if (typeof stack.prepend === 'function') stack.prepend(el);
+  else stack.insertBefore(el, stack.firstElementChild || null);
 
   const duration = (settings.notify?.toastDurationS||5)*1000;
   setTimeout(()=> {
@@ -635,7 +660,6 @@ function showToast(title, message, type='info'){
     setTimeout(()=> el.remove(), 200);
   }, duration);
 }
-
 function playNotificationSound(){
   try{
     const ac=new (window.AudioContext||window.webkitAudioContext)();
@@ -814,7 +838,6 @@ function renderRebateSettings(){
   const selB=grpB.querySelector('#rebateB_book'), inpB=grpB.querySelector('#rebateB_rate');
   fillOptions(selA, settings.rebateA?.book||''); fillOptions(selB, settings.rebateB?.book||'');
   inpA.value=settings.rebateA?.rate ?? ''; inpB.value=settings.rebateB?.rate ?? '';
-  // 点击保存按钮仍可保存
   saveBtn.addEventListener('click', ()=>{
     settings.rebateA={ book:selA.value||'', rate:parseFloat(inpA.value)||0 };
     settings.rebateB={ book:selB.value||'', rate:parseFloat(inpB.value)||0 };
