@@ -205,7 +205,6 @@ function emitOneABPairMock(){
   const f = rand(MOCK_FIXTURES);
   const mkt = Math.random()<0.5 ? 'ou' : 'ah';
   const line = mkt==='ou' ? '2.5' : '0';
-  // 2.10 / 2.10 → 一定满足套利（方便你立即看到弹窗）
   const o1 = 2.10, o2 = 2.10;
   const opp = {
     event_id:`ABPAIR-${Date.now()}`,
@@ -216,7 +215,7 @@ function emitOneABPairMock(){
   };
   if (mkt==='ou'){ opp.pickA={book:a,selection:'over',odds:o1}; opp.pickB={book:b,selection:'under',odds:o2}; }
   else { opp.pickA={book:a,selection:'home',odds:o1}; opp.pickB={book:b,selection:'away',odds:o2}; }
-  processOpportunity(opp, true); // 立刻触发提醒
+  processOpportunity(opp, true);
   renderMarketBoard(); updateLastUpdateTime();
 }
 
@@ -237,7 +236,7 @@ function pushOneMock(){
   };
   if (mkt==='ou'){ opp.pickA={book:b1,selection:'over',odds:o1}; opp.pickB={book:b2,selection:'under',odds:o2}; }
   else { opp.pickA={book:b1,selection:'home',odds:o1}; opp.pickB={book:b2,selection:'away',odds:o2}; }
-  processOpportunity(opp, true); // ← 这里改成 true：增量推送会弹窗
+  processOpportunity(opp, true);
   renderMarketBoard(); updateLastUpdateTime();
 }
 function stopMockData(){ if (mockTimer) { clearInterval(mockTimer); mockTimer=null; } }
@@ -510,7 +509,7 @@ function addArbitrageOpportunity(result, shouldAlert){
 
   const existed=tbody.querySelector(`tr[data-signature="${sig}"]`);
   if (existed){
-    if (result.profit<minProfit){ existed.remove(); alertedSignatures.delete(sig); return; }
+    if (result.profit<minProfit){ existed.remove(); alertedSignatures.delete(sig); ensureNoDataRow(); return; }
     updateArbitrageRow(existed,result);
     if (shouldAlert && result.shouldAlert) highlightRow(existed);
     return;
@@ -521,7 +520,15 @@ function addArbitrageOpportunity(result, shouldAlert){
   const row=createArbitrageRow(result); tbody.appendChild(row);
   if (result.shouldAlert && shouldAlert){
     highlightRow(row); sendAlert(result);
-    if ((settings.notify?.autoHideRowS||0)>0) setTimeout(()=> row.classList.add('hidden-row'), settings.notify.autoHideRowS*1000);
+    const hideS = parseInt(settings.notify?.autoHideRowS)||0;
+    if (hideS>0) setTimeout(()=> { try{ row.remove(); ensureNoDataRow(); }catch(_){} }, hideS*1000);
+  }
+}
+function ensureNoDataRow(){
+  const tbody=document.querySelector('#arbitrageTable tbody');
+  if (!tbody) return;
+  if (!tbody.querySelector('tr')) {
+    const nd=document.createElement('tr'); nd.className='no-data'; nd.innerHTML='<td colspan="8">暂无数据</td>'; tbody.appendChild(nd);
   }
 }
 function createArbitrageRow(result){
@@ -594,10 +601,55 @@ function recalculateAllArbitrageOpportunities(){
 }
 
 /* ------------------ 提醒（Toast） ------------------ */
-function sendAlert(result){
-  // 二次校验：只有“返水 A/B 平台对碰”才提醒
-  if (!isABPairOpp(result.opportunity)) return;
+function ensureAlertStyles(){
+  if (document.getElementById('toast-style-inject')) return;
+  const st = document.createElement('style');
+  st.id = 'toast-style-inject';
+  st.textContent = `
+  #toast-stack{position:fixed;top:16px;right:16px;z-index:2147483647;display:flex;flex-direction:column;gap:10px;pointer-events:none}
+  #toast-stack .toast{pointer-events:auto;min-width:260px;max-width:420px;background:rgba(28,30,36,.96);color:#fff;
+    padding:12px 14px;border-radius:10px;box-shadow:0 10px 28px rgba(0,0,0,.35);backdrop-filter:blur(6px)}
+  #toast-stack .toast.success{border-left:3px solid #4ade80}
+  #toast-stack .toast.error{border-left:3px solid #ef4444}
+  .toast-title{font-weight:600;margin-bottom:4px}
+  .toast.removing{opacity:.0;transition:opacity .2s ease}
+  .hidden-row{display:none !important}
+  `;
+  document.head.appendChild(st);
+}
+function ensureToastStack(){
+  let stack = document.getElementById('toast-stack');
+  if (!stack){
+    stack = document.createElement('div');
+    stack.id = 'toast-stack';
+    document.body.appendChild(stack);
+  }
+  // 关键样式兜底（防被外部 CSS 覆盖）
+  const s = stack.style;
+  s.position = 'fixed'; s.top = '16px'; s.right = '16px';
+  s.zIndex = '2147483647'; s.display = 'flex'; s.flexDirection = 'column'; s.gap = '10px'; s.pointerEvents='none';
+  return stack;
+}
+function showToast(title, message, type='info'){
+  ensureAlertStyles();
+  const stack = ensureToastStack();
+  const el = document.createElement('div');
+  el.className = `toast ${type}`;
+  el.innerHTML = `<div class="toast-title">${title}</div><div class="toast-message">${message}</div>`;
 
+  // 最新置顶
+  if (stack.firstElementChild) stack.insertBefore(el, stack.firstElementChild);
+  else stack.appendChild(el);
+
+  const duration = (settings.notify?.toastDurationS||5)*1000;
+  setTimeout(()=> {
+    el.classList.add('removing');
+    setTimeout(()=> el.remove(), 200);
+  }, duration);
+}
+function sendAlert(result){
+  // 仅 A/B 对碰才弹
+  if (!isABPairOpp(result.opportunity)) return;
   const sig=result.signature; if (alertedSignatures.has(sig)) return; alertedSignatures.add(sig);
 
   const opp=result.opportunity;
@@ -617,48 +669,12 @@ function sendAlert(result){
 
   if (settings.notify?.toastEnabled) showToast(title,msg,'success');
 
+  // 系统通知
   if (settings.notify?.systemEnabled && 'Notification' in window && Notification.permission==='granted') {
     new Notification(title, { body:`${marketText}${lineText}  盈利 ${result.profit.toLocaleString()}`, icon:'/favicon.ico' });
   }
+  // 声音：首次需要一次用户交互（浏览器限制）
   if (settings.notify?.soundEnabled && hasUserInteracted) playNotificationSound();
-}
-
-/* 保证容器存在 + 默认样式（右上角固定），并支持“最新置顶” */
-function ensureToastStack(){
-  let stack = document.getElementById('toast-stack');
-  if (!stack){
-    stack = document.createElement('div');
-    stack.id = 'toast-stack';
-    document.body.appendChild(stack);
-  }
-  // 强制关键样式，避免被其它 CSS 覆盖；固定悬浮右上角，滚动不隐藏
-  const s = stack.style;
-  s.position = 'fixed';
-  s.top = '16px';
-  s.right = '16px';
-  s.zIndex = '2147483647';  // 超高，确保不被遮住
-  s.display = 'flex';
-  s.flexDirection = 'column';   // 从上往下排
-  s.gap = '10px';
-  return stack;
-}
-function showToast(title, message, type='info'){
-  const stack = ensureToastStack();
-  const el = document.createElement('div');
-  el.className = `toast ${type}`;
-  el.innerHTML = `
-    <div class="toast-title">${title}</div>
-    <div class="toast-message">${message}</div>
-  `;
-  // 最新置顶（优先用 prepend；不支持时回退 insertBefore）
-  if (typeof stack.prepend === 'function') stack.prepend(el);
-  else stack.insertBefore(el, stack.firstElementChild || null);
-
-  const duration = (settings.notify?.toastDurationS||5)*1000;
-  setTimeout(()=> {
-    el.classList.add('removing');
-    setTimeout(()=> el.remove(), 200);
-  }, duration);
 }
 function playNotificationSound(){
   try{
@@ -718,11 +734,11 @@ function renderMarketBoard(){
 function initUI(loaded){
   settings=loaded;
   initHamburgerMenu(); initSettingsPanels(); initMarketControls();
-  ensureToastStack();                            // 确保提醒容器存在（并刷新样式）
+  ensureAlertStyles(); ensureToastStack();          // 提醒容器 + 样式
   requestNotificationPermission();
   document.addEventListener('click', ()=> hasUserInteracted=true, {once:true});
   document.addEventListener('keydown', ()=> hasUserInteracted=true, {once:true});
-  saveSettings();                                // 兜底写回一次
+  saveSettings();                                   // 兜底写回一次
   window.addEventListener('beforeunload', saveSettings);
 }
 
@@ -780,7 +796,18 @@ function initSettingsPanels(){
   if (toastNotify)  toastNotify .addEventListener('change', ()=>{ settings.notify=settings.notify||{}; settings.notify.toastEnabled=toastNotify.checked; saveSettings(); });
   if (toastDuration) toastDuration.addEventListener('input', ()=>{ settings.notify=settings.notify||{}; settings.notify.toastDurationS=parseInt(toastDuration.value)||5; saveSettings(); });
   if (autoHideRow)  autoHideRow .addEventListener('input', ()=>{ settings.notify=settings.notify||{}; settings.notify.autoHideRowS=parseInt(autoHideRow.value)||0; saveSettings(); });
-  if (clearAlerts) clearAlerts.addEventListener('click', ()=>{ alertedSignatures.clear(); document.querySelectorAll('#arbitrageTable tbody tr.hidden-row').forEach(r=>r.classList.remove('hidden-row')); showToast('系统','已清除提醒记录','success'); });
+
+  if (clearAlerts) clearAlerts.addEventListener('click', ()=>{
+    // 清除提醒签名 + 清空 toast + 清空表格
+    alertedSignatures.clear();
+    const stack = ensureToastStack(); stack.innerHTML='';
+    const tbody=document.querySelector('#arbitrageTable tbody');
+    if (tbody) {
+      tbody.querySelectorAll('tr').forEach(tr=>{ if(!tr.classList.contains('no-data')) tr.remove(); });
+      ensureNoDataRow();
+    }
+    showToast('系统','已清除提醒记录','success');
+  });
 }
 
 /* 书商 UI 渲染 */
@@ -804,7 +831,7 @@ function renderBookList(){
   });
 }
 
-/* A/B 返水设置 */
+/* A/B 返水设置（改为“实时保存”） */
 function renderRebateSettings(){
   const container=document.querySelector('#panel-rebates .panel-content'); if (!container) return;
   container.innerHTML='';
@@ -824,9 +851,6 @@ function renderRebateSettings(){
     <div class="form-row"><label>返水（如 0.006）</label><input id="rebateB_rate" type="number" step="0.0001" min="0" placeholder="0.006"></div>`;
   container.appendChild(grpB);
 
-  const saveBtn=document.createElement('button'); saveBtn.id='saveRebatesABBtn'; saveBtn.className='test-connection-btn'; saveBtn.textContent='保存返水设置';
-  container.appendChild(saveBtn);
-
   function fillOptions(sel,current){
     sel.innerHTML='';
     const opt0=document.createElement('option'); opt0.value=''; opt0.textContent = enabled.length ? '— 请选择 —' : '请先在书商面板勾选书商'; sel.appendChild(opt0);
@@ -838,11 +862,12 @@ function renderRebateSettings(){
   const selB=grpB.querySelector('#rebateB_book'), inpB=grpB.querySelector('#rebateB_rate');
   fillOptions(selA, settings.rebateA?.book||''); fillOptions(selB, settings.rebateB?.book||'');
   inpA.value=settings.rebateA?.rate ?? ''; inpB.value=settings.rebateB?.rate ?? '';
-  saveBtn.addEventListener('click', ()=>{
-    settings.rebateA={ book:selA.value||'', rate:parseFloat(inpA.value)||0 };
-    settings.rebateB={ book:selB.value||'', rate:parseFloat(inpB.value)||0 };
-    saveSettings(); showToast('保存成功','已更新 A/B 平台返水','success'); recalculateAllArbitrageOpportunities();
-  });
+
+  // 即改即存
+  selA.addEventListener('change', ()=>{ settings.rebateA={ book:selA.value||'', rate:parseFloat(inpA.value)||0 }; saveSettings(); recalculateAllArbitrageOpportunities(); });
+  selB.addEventListener('change', ()=>{ settings.rebateB={ book:selB.value||'', rate:parseFloat(inpB.value)||0 }; saveSettings(); recalculateAllArbitrageOpportunities(); });
+  inpA.addEventListener('input', ()=>{ settings.rebateA={ book:selA.value||'', rate:parseFloat(inpA.value)||0 }; saveSettings(); recalculateAllArbitrageOpportunities(); });
+  inpB.addEventListener('input', ()=>{ settings.rebateB={ book:selB.value||'', rate:parseFloat(inpB.value)||0 }; saveSettings(); recalculateAllArbitrageOpportunities(); });
 }
 function updateABookOptions(){
   const sel=document.getElementById('a-book'); if (!sel) return;
