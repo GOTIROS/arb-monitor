@@ -718,61 +718,93 @@ function updateABookOptions(){
 
 /* 数据源面板 */
 function initDatasourcePanel(){
-  const wsModeAuto=document.getElementById('ws-mode-auto');
-  const wsModeCustom=document.getElementById('ws-mode-custom');
-  const wsUrlInput=document.getElementById('ws-url');
-  const wsTokenInput=document.getElementById('ws-token');
-  const useMockChk=document.getElementById('use-mock');
-  const testBtn=document.getElementById('test-connection');
-  const reconnectBtn=document.getElementById('reconnect-now');
+  const wsModeAuto    = document.getElementById('ws-mode-auto');
+  const wsModeCustom  = document.getElementById('ws-mode-custom');
+  const wsUrlInput    = document.getElementById('ws-url');
+  const wsTokenInput  = document.getElementById('ws-token');
+  const useMockChk    = document.getElementById('use-mock');
+  const testBtn       = document.getElementById('test-connection');
+  const reconnectBtn  = document.getElementById('reconnect-now');
 
-  const ds=settings.datasource||{};
-  if (ds.wsMode==='custom'){ wsModeCustom && (wsModeCustom.checked=true); wsUrlInput && (wsUrlInput.disabled=false); }
-  else { wsModeAuto && (wsModeAuto.checked=true); wsUrlInput && (wsUrlInput.disabled=true); }
-  wsUrlInput && (wsUrlInput.value=ds.wsUrl||''); wsTokenInput && (wsTokenInput.value=ds.token||'');
+  const ds = settings.datasource || {};
+
+  // 初始化单选/输入框
+  if (ds.wsMode === 'custom') {
+    wsModeCustom && (wsModeCustom.checked = true);
+    wsUrlInput   && (wsUrlInput.disabled = false);
+  } else {
+    wsModeAuto && (wsModeAuto.checked = true);
+    wsUrlInput && (wsUrlInput.disabled = true);
+  }
+  wsUrlInput   && (wsUrlInput.value = ds.wsUrl || '');
+  wsTokenInput && (wsTokenInput.value = ds.token || '');
+
+  // 保持 UI 和设置一致
   if (useMockChk) useMockChk.checked = !!ds.useMock;
 
-  const syncMock=()=>{
-    settings.datasource.useMock = !!useMockChk.checked; saveSettings();
-    if (settings.datasource.useMock) enterMockMode();
-    else {
-      stopMockData(); marketBoard.clear(); clearArbitrageTable(); clearDiscoveredBooks(); renderMarketBoard(); alertedSignatures.clear();
-      const stack=document.getElementById('toast-stack'); if (stack) stack.innerHTML=''; reconnectNow();
+  // —— 事件绑定（保持你原有逻辑）——
+  const syncMock = ()=>{
+    settings.datasource.useMock = !!useMockChk.checked;
+    saveSettings();
+    if (settings.datasource.useMock) {
+      enterMockMode();          // 进入模拟
+    } else {
+      stopMockData();           // 退出模拟
+      marketBoard.clear();
+      clearArbitrageTable();
+      clearDiscoveredBooks();
+      renderMarketBoard();
+      alertedSignatures.clear();
+      const stack = document.getElementById('toast-stack');
+      if (stack) stack.innerHTML = '';
+      reconnectNow();           // 回到真实 WS
     }
   };
 
-  wsModeAuto && wsModeAuto.addEventListener('change', ()=>{ if (wsModeAuto.checked){ settings.datasource.wsMode='auto'; wsUrlInput && (wsUrlInput.disabled=true); saveSettings(); showReconnectButton(); }});
-  wsModeCustom && wsModeCustom.addEventListener('change', ()=>{ if (wsModeCustom.checked){ settings.datasource.wsMode='custom'; wsUrlInput && (wsUrlInput.disabled=false); saveSettings(); showReconnectButton(); }});
-  wsUrlInput && wsUrlInput.addEventListener('input', ()=>{ settings.datasource.wsUrl=wsUrlInput.value; saveSettings(); showReconnectButton(); });
-  wsTokenInput && wsTokenInput.addEventListener('input', ()=>{ settings.datasource.token=wsTokenInput.value; saveSettings(); showReconnectButton(); });
+  wsModeAuto   && wsModeAuto.addEventListener('change', ()=>{ if (wsModeAuto.checked){ settings.datasource.wsMode='auto';   wsUrlInput&&(wsUrlInput.disabled=true);  saveSettings(); showReconnectButton(); }});
+  wsModeCustom && wsModeCustom.addEventListener('change', ()=>{ if (wsModeCustom.checked){ settings.datasource.wsMode='custom'; wsUrlInput&&(wsUrlInput.disabled=false); saveSettings(); showReconnectButton(); }});
+  wsUrlInput   && wsUrlInput.addEventListener('input', ()=>{ settings.datasource.wsUrl = wsUrlInput.value; saveSettings(); showReconnectButton(); });
+  wsTokenInput && wsTokenInput.addEventListener('input', ()=>{ settings.datasource.token = wsTokenInput.value; saveSettings(); showReconnectButton(); });
 
   if (useMockChk){
     useMockChk.addEventListener('change', syncMock);
-    const parent=useMockChk.closest('.toggle-item');
-    parent && parent.addEventListener('click', (e)=>{ if (e.target!==useMockChk){ e.preventDefault(); useMockChk.checked=!useMockChk.checked; syncMock(); }});
+    const parent = useMockChk.closest('.toggle-item');
+    parent && parent.addEventListener('click', (e)=>{
+      if (e.target !== useMockChk) { e.preventDefault(); useMockChk.checked = !useMockChk.checked; syncMock(); }
+    });
   }
 
+  // 「测试连接」按钮：模拟模式下直接提示成功
   if (testBtn) testBtn.addEventListener('click', ()=>{
-    if (settings.datasource?.useMock){ showToast('连接测试','当前为模拟模式，无需连接服务器','success'); return; }
-    testBtn.disabled=true; testBtn.textContent='测试中...';
+    if (settings.datasource?.useMock){
+      showToast('连接测试','当前为模拟模式，无需连接服务器','success');
+      return;
+    }
+    testBtn.disabled = true; testBtn.textContent = '测试中...';
     let url;
-    if (settings.datasource?.wsMode==='custom' && (settings.datasource?.wsUrl||'').trim()){ url=settings.datasource.wsUrl.trim(); }
-    else { const protocol=location.protocol==='https:'?'wss':'ws'; url=`${protocol}://${location.host}/ws/opps`; }
-    const t=new WebSocket(url);
-    const timeout=setTimeout(()=>{ try{t.close();}catch(_){ } testBtn.disabled=false; testBtn.textContent='测试连接'; showToast('连接测试','连接超时','error'); },5000);
-    t.onopen=()=>{ clearTimeout(timeout); try{t.close();}catch(_){ } testBtn.disabled=false; testBtn.textContent='测试连接'; showToast('连接测试','连接成功','success'); };
-    t.onerror=()=>{ clearTimeout(timeout); testBtn.disabled=false; testBtn.textContent='测试连接'; showToast('连接测试','连接失败','error'); };
+    if (settings.datasource?.wsMode==='custom' && (settings.datasource?.wsUrl||'').trim()){
+      url = settings.datasource.wsUrl.trim();
+    } else {
+      const protocol = location.protocol==='https:' ? 'wss' : 'ws';
+      url = `${protocol}://${location.host}/ws/opps`;
+    }
+    const t = new WebSocket(url);
+    const timeout = setTimeout(()=>{ try{t.close();}catch(_){ } testBtn.disabled=false; testBtn.textContent='测试连接'; showToast('连接测试','连接超时','error'); }, 5000);
+    t.onopen = ()=>{ clearTimeout(timeout); try{t.close();}catch(_){ } testBtn.disabled=false; testBtn.textContent='测试连接'; showToast('连接测试','连接成功','success'); };
+    t.onerror= ()=>{ clearTimeout(timeout); testBtn.disabled=false; testBtn.textContent='测试连接'; showToast('连接测试','连接失败','error'); };
   });
-  reconnectBtn && reconnectBtn.addEventListener('click', ()=>{ reconnectNow(); hideReconnectButton(); });
-}
-function showReconnectButton(){ const b=document.getElementById('reconnect-now'); if (b) b.style.display='block'; }
-function hideReconnectButton(){ const b=document.getElementById('reconnect-now'); if (b) b.style.display='none'; }
 
-function updateStakeInputs(){ const s=settings.stake||{}; const amountAInput=document.getElementById('amount-a'); const minProfitInput=document.getElementById('min-profit'); if (amountAInput) amountAInput.value=s.amountA||10000; if (minProfitInput) minProfitInput.value=s.minProfit||0; updateABookOptions(); }
-function updateNotifyInputs(){
-  const n=settings.notify||{}; const systemNotify=document.getElementById('system-notify'); const soundNotify=document.getElementById('sound-notify'); const toastNotify=document.getElementById('toast-notify'); const toastDuration=document.getElementById('toast-duration'); const autoHideRow=document.getElementById('auto-hide-row');
-  if (systemNotify) systemNotify.checked=!!n.systemEnabled; if (soundNotify) soundNotify.checked=n.soundEnabled!==false; if (toastNotify) toastNotify.checked=n.toastEnabled!==false;
-  if (toastDuration) toastDuration.value=n.toastDurationS||5; if (autoHideRow) autoHideRow.value=n.autoHideRowS||30;
+  reconnectBtn && reconnectBtn.addEventListener('click', ()=>{ reconnectNow(); hideReconnectButton(); });
+
+  // —— 关键兜底：如果此刻 UI 显示为“已开启模拟”，立即启动模拟（不等事件）——
+  if (useMockChk && useMockChk.checked) {
+    if (!settings.datasource.useMock) {
+      settings.datasource.useMock = true;
+      saveSettings();
+    }
+    // 放到下一帧，确保面板已就绪再灌数据
+    queueMicrotask(()=> enterMockMode());
+  }
 }
 
 /* 面板状态 */
