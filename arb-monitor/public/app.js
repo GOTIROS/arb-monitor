@@ -401,6 +401,16 @@ function getRebateRateForBook(bookKey){
   return 0;
 }
 
+/* —— 判断是否为“返水设置中的 A/B 平台互相对碰” —— */
+function isABPairOpp(opp){
+  const a = (settings.rebateA?.book || '').toLowerCase();
+  const b = (settings.rebateB?.book || '').toLowerCase();
+  if (!a || !b) return false;
+  const x = (opp?.pickA?.book || '').toLowerCase();
+  const y = (opp?.pickB?.book || '').toLowerCase();
+  return (x===a && y===b) || (x===b && y===a);
+}
+
 /* 计算套利（仅当机会是 A/B 平台对碰时才触发提醒） */
 function calculateArbitrage(opp){
   if (!opp?.pickA || !opp?.pickB) return null;
@@ -556,6 +566,9 @@ function recalculateAllArbitrageOpportunities(){
 
 /* ------------------ 提醒（Toast） ------------------ */
 function sendAlert(result){
+  // 二次校验：只有“返水 A/B 平台对碰”才提醒
+  if (!isABPairOpp(result.opportunity)) return;
+
   const sig=result.signature; if (alertedSignatures.has(sig)) return; alertedSignatures.add(sig);
 
   const opp=result.opportunity;
@@ -587,18 +600,20 @@ function ensureToastStack(){
   if (!stack){
     stack = document.createElement('div');
     stack.id = 'toast-stack';
-    // 基础样式，防止因为没有样式导致“看不见”
-    stack.style.position = 'fixed';
-    stack.style.top = '16px';
-    stack.style.right = '16px';
-    stack.style.zIndex = '9999';
-    stack.style.display = 'flex';
-    stack.style.flexDirection = 'column';
-    stack.style.gap = '10px';
     document.body.appendChild(stack);
   }
+  // 不管是否新建，强制刷新关键样式，防止被外部 CSS 覆盖导致看起来“没置顶/没显示”
+  const s = stack.style;
+  s.position = 'fixed';
+  s.top = '16px';
+  s.right = '16px';
+  s.zIndex = '2147483647';
+  s.display = 'flex';
+  s.flexDirection = 'column';   // 从上往下排，配合 prepend 实现“最新在最上”
+  s.gap = '10px';
   return stack;
 }
+
 function showToast(title, message, type='info'){
   const stack = ensureToastStack();
   const el = document.createElement('div');
@@ -607,9 +622,12 @@ function showToast(title, message, type='info'){
     <div class="toast-title">${title}</div>
     <div class="toast-message">${message}</div>
   `;
-  // 最新置顶（优先用 prepend；不支持时回退 insertBefore）
-  if (typeof stack.prepend === 'function') stack.prepend(el);
-  else stack.insertBefore(el, stack.firstElementChild || null);
+  // 最新置顶：优先用 prepend；不支持时回退 insertBefore 到第一个元素前
+  if (typeof stack.prepend === 'function') {
+    stack.prepend(el);
+  } else {
+    stack.insertBefore(el, stack.firstElementChild || null);
+  }
 
   const duration = (settings.notify?.toastDurationS||5)*1000;
   setTimeout(()=> {
@@ -617,6 +635,7 @@ function showToast(title, message, type='info'){
     setTimeout(()=> el.remove(), 200);
   }, duration);
 }
+
 function playNotificationSound(){
   try{
     const ac=new (window.AudioContext||window.webkitAudioContext)();
@@ -675,7 +694,7 @@ function renderMarketBoard(){
 function initUI(loaded){
   settings=loaded;
   initHamburgerMenu(); initSettingsPanels(); initMarketControls();
-  ensureToastStack();                            // 确保提醒容器存在
+  ensureToastStack();                            // 确保提醒容器存在（并刷新样式）
   requestNotificationPermission();
   document.addEventListener('click', ()=> hasUserInteracted=true, {once:true});
   document.addEventListener('keydown', ()=> hasUserInteracted=true, {once:true});
@@ -795,6 +814,7 @@ function renderRebateSettings(){
   const selB=grpB.querySelector('#rebateB_book'), inpB=grpB.querySelector('#rebateB_rate');
   fillOptions(selA, settings.rebateA?.book||''); fillOptions(selB, settings.rebateB?.book||'');
   inpA.value=settings.rebateA?.rate ?? ''; inpB.value=settings.rebateB?.rate ?? '';
+  // 点击保存按钮仍可保存
   saveBtn.addEventListener('click', ()=>{
     settings.rebateA={ book:selA.value||'', rate:parseFloat(inpA.value)||0 };
     settings.rebateB={ book:selB.value||'', rate:parseFloat(inpB.value)||0 };
