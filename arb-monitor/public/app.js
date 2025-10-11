@@ -57,25 +57,23 @@ function guessKickoffTs(obj) {
 function formatTime(date=new Date()) {
   return date.toLocaleTimeString('zh-CN', { hour12:false, hour:'2-digit', minute:'2-digit', second:'2-digit' });
 }
-function formatBookName(b){
-  const s=(b||'').toString();
-  return s ? s.charAt(0).toUpperCase()+s.slice(1) : '';
+function prettyBook(b){ b = (b||'').toString(); return b.charAt(0).toUpperCase()+b.slice(1); }
+function zhMarket(m){ return m==='ah' ? '让球' : '大小球'; }
+function zhSel(sel){
+  switch((sel||'').toString().toLowerCase()){
+    case 'home': return '主';
+    case 'away': return '客';
+    case 'over': return '大';
+    case 'under': return '小';
+    default: return sel;
+  }
 }
-function selCN(sel){
-  const s=(sel||'').toLowerCase();
-  if (s==='home')  return '主队';
-  if (s==='away')  return '客队';
-  if (s==='over')  return '大球';
-  if (s==='under') return '小球';
-  return s;
-}
-function marketCN(m){ return m==='ah' ? '让球' : '大小球'; }
 
 /* ------------------ 默认设置 ------------------ */
 const DEFAULT_SETTINGS = {
   datasource: { wsMode:'auto', wsUrl:'', token:'', useMock:false },
   books: {},
-  rebates: {},                   // 旧字段保留（不再使用）
+  rebates: {},                   // 旧字段保留
   rebateA: { book:'', rate:0 },  // A 平台（项目二）
   rebateB: { book:'', rate:0 },  // B 平台
   stake: { aBook:'', amountA:10000, minProfit:0 },
@@ -87,7 +85,7 @@ function loadSettings() {
   try {
     const raw = localStorage.getItem('arb_settings_v1');
     const loaded = raw ? JSON.parse(raw) : {};
-    const merged = {
+    return {
       ...DEFAULT_SETTINGS,
       ...loaded,
       datasource: { ...DEFAULT_SETTINGS.datasource, ...(loaded.datasource||{}) },
@@ -98,7 +96,6 @@ function loadSettings() {
       stake:      { ...DEFAULT_SETTINGS.stake,      ...(loaded.stake||{}) },
       notify:     { ...DEFAULT_SETTINGS.notify,     ...(loaded.notify||{}) }
     };
-    return merged;
   } catch(e) {
     console.error('加载设置失败:', e);
     return DEFAULT_SETTINGS;
@@ -116,10 +113,10 @@ function addDiscoveredBook(book){
   if (!discoveredBooks.has(b)) {
     discoveredBooks.add(b);
     if (!(b in settings.books)) { settings.books[b] = true; saveSettings(); }
-    renderBookList(); renderRebateSettings(); updateABookOptions(); updateArbHeaders();
+    renderBookList(); renderRebateSettings(); updateABookOptions();
   }
 }
-function clearDiscoveredBooks(){ discoveredBooks.clear(); renderBookList(); renderRebateSettings(); updateABookOptions(); updateArbHeaders(); }
+function clearDiscoveredBooks(){ discoveredBooks.clear(); renderBookList(); renderRebateSettings(); updateABookOptions(); }
 
 /* ------------------ 工具函数 ------------------ */
 function getEventKey(opp){ return `${opp.league || ''}|${opp.event_name || ''}`; }
@@ -150,7 +147,7 @@ function connectWS() {
     ws.onopen = () => { wsReconnectAttempts=0; updateConnectionStatus('connected'); startHeartbeatMonitor(); };
     ws.onmessage = (ev) => { try { handleWebSocketMessage(JSON.parse(ev.data)); } catch(e){ console.error('解析消息失败:', e); } };
     ws.onclose = () => {
-      if (settings.datasource?.useMock) return; // 模拟模式时忽略
+      if (settings.datasource?.useMock) return; // 模拟模式时忽略 onclose 对 UI 的影响
       updateConnectionStatus('reconnecting'); stopHeartbeatMonitor(); scheduleReconnect();
     };
     ws.onerror = (err) => { console.error('WS 错误:', err); };
@@ -160,11 +157,9 @@ function connectWS() {
   }
 }
 function enterMockMode(){
-  // 彻底退出 WS/重连
-  if (ws) {
-    try { ws.onopen = ws.onmessage = ws.onerror = ws.onclose = null; ws.close(); } catch(_){}
-    ws = null;
-  }
+  // 退出 WS
+  if (ws) { try { ws.onopen = ws.onmessage = ws.onerror = ws.onclose = null; ws.close(); } catch(_){}
+    ws = null; }
   if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer=null; }
   stopHeartbeatMonitor();
 
@@ -196,8 +191,11 @@ function enterMockMode(){
     initial.push(opp);
   }
   handleSnapshot(initial);
-  updateConnectionStatus('connected');     // 显示“已连接（模拟）”
-  stopMockData(); mockTimer = setInterval(pushOneMock, 1500);
+  updateConnectionStatus('connected');
+
+  // 持续随机推送
+  stopMockData();
+  mockTimer = setInterval(pushOneMock, 1500);
   showToast('模拟数据', '已启动 10 书商的随机盘口流', 'success');
 }
 function pushOneMock(){
@@ -419,11 +417,10 @@ function calculateArbitrage(opp){
   const bookB = normBookKey(opp.pickB.book);
   const aBook = normBookKey(settings.stake?.aBook||'');
 
-  let pickA, pickB, aInvolved=false;
-  // pickA 永远代表“固定金额”的那一边，便于显示与计算
-  if (bookA===aBook){ aInvolved=true; pickA=opp.pickA; pickB=opp.pickB; }
-  else if (bookB===aBook){ aInvolved=true; pickA=opp.pickB; pickB=opp.pickA; }
-  else { pickA=opp.pickA; pickB=opp.pickB; } // aBook 未参与也照样按 A=pickA 计算
+  let pickA, pickB, sideA, sideB, aInvolved=false;
+  if (bookA===aBook){ aInvolved=true; pickA=opp.pickA; pickB=opp.pickB; sideA='A'; sideB='B'; }
+  else if (bookB===aBook){ aInvolved=true; pickA=opp.pickB; pickB=opp.pickA; sideA='B'; sideB='A'; }
+  else { pickA=opp.pickA; pickB=opp.pickB; sideA='—'; sideB='B'; }
 
   const oA=parseFloat(pickA.odds)||0, oB=parseFloat(pickB.odds)||0;
   const sA=parseInt(settings.stake?.amountA)||10000;
@@ -437,12 +434,9 @@ function calculateArbitrage(opp){
   const minProfit = parseInt(settings.stake?.minProfit)||0;
 
   return {
-    opportunity: opp,
-    pickA, pickB,
-    waterA:(oA-1).toFixed(3),
-    waterB:(oB-1).toFixed(3),
-    stakeB:Math.round(sB),
-    profit:Math.round(profit),
+    opportunity: opp, sideA, sideB, pickA, pickB,
+    waterA:(oA-1).toFixed(3), waterB:(oB-1).toFixed(3),
+    stakeB:Math.round(sB), profit:Math.round(profit),
     shouldAlert:(aInvolved && profit>=minProfit),
     signature: generateSignature(opp)
   };
@@ -450,6 +444,24 @@ function calculateArbitrage(opp){
 function generateSignature(opp){
   const books = [`${opp.pickA?.book||''}_${opp.pickA?.selection||''}`, `${opp.pickB?.book||''}_${opp.pickB?.selection||''}`].sort();
   return `${getEventKey(opp)}_${opp.market}_${opp.line_text||opp.line_numeric||''}_${books.join('_')}`;
+}
+
+/* ------- 辅助：根据返水设置，把显示上的“选择A/B”映射为对应书商 ------- */
+function picksForABDisplay(opp){
+  const aBook = normBookKey(settings.rebateA?.book||'');
+  const bBook = normBookKey(settings.rebateB?.book||'');
+  let pickForA = null, pickForB = null;
+  if (aBook){
+    if (normBookKey(opp.pickA.book)===aBook) pickForA = opp.pickA;
+    else if (normBookKey(opp.pickB.book)===aBook) pickForA = opp.pickB;
+  }
+  if (bBook){
+    if (normBookKey(opp.pickA.book)===bBook) pickForB = opp.pickA;
+    else if (normBookKey(opp.pickB.book)===bBook) pickForB = opp.pickB;
+  }
+  if (!pickForA) pickForA = opp.pickA;
+  if (!pickForB) pickForB = opp.pickB;
+  return { pickForA, pickForB };
 }
 
 /* ------------------ 套利表格 ------------------ */
@@ -473,30 +485,38 @@ function addArbitrageOpportunity(result, shouldAlert){
     if ((settings.notify?.autoHideRowS||0)>0) setTimeout(()=> row.classList.add('hidden-row'), settings.notify.autoHideRowS*1000);
   }
 }
-function pickCellText(book, selection){
-  return `${formatBookName(book)}（${selCN(selection)}）`;
-}
 function createArbitrageRow(result){
   const row=document.createElement('tr'); row.setAttribute('data-signature', result.signature);
-  const opp=result.opportunity; const lineText=opp.line_text||(opp.line_numeric?.toString()||'');
+  const opp=result.opportunity; const marketText=zhMarket(opp.market); const lineText=opp.line_text||(opp.line_numeric?.toString()||'');
+  const { pickForA, pickForB } = picksForABDisplay(opp);
+  const pickAText = `${prettyBook(pickForA.book)}（${zhSel(pickForA.selection)}）`;
+  const pickBText = `${prettyBook(pickForB.book)}（${zhSel(pickForB.selection)}）`;
+  const waterAForDisplay = (parseFloat(pickForA.odds)-1).toFixed(3);
+  const waterBForDisplay = (parseFloat(pickForB.odds)-1).toFixed(3);
+
   row.innerHTML=`
     <td>${opp.event_name||''}</td>
-    <td>${marketCN(opp.market)} ${lineText}</td>
-    <td>${pickCellText(result.pickA.book, result.pickA.selection)}</td>
-    <td>${pickCellText(result.pickB.book, result.pickB.selection)}</td>
-    <td>${result.waterA}</td>
-    <td>${result.waterB}</td>
+    <td>${marketText} ${lineText}</td>
+    <td>${pickAText}</td>
+    <td>${pickBText}</td>
+    <td>${waterAForDisplay}</td>
+    <td>${waterBForDisplay}</td>
     <td>${result.stakeB.toLocaleString()}</td>
     <td>${result.profit.toLocaleString()}</td>`;
   return row;
 }
 function updateArbitrageRow(row,result){
   const c=row.cells; if (c.length<8) return;
-  c[2].textContent = `${formatBookName(result.pickA.book)}（${selCN(result.pickA.selection)}）`;
-  c[3].textContent = `${formatBookName(result.pickB.book)}（${selCN(result.pickB.selection)}）`;
-  c[4].textContent = result.waterA;
-  c[5].textContent = result.waterB;
-  c[6].textContent = result.stakeB.toLocaleString();
+  const opp=result.opportunity;
+  const { pickForA, pickForB } = picksForABDisplay(opp);
+  const waterAForDisplay = (parseFloat(pickForA.odds)-1).toFixed(3);
+  const waterBForDisplay = (parseFloat(pickForB.odds)-1).toFixed(3);
+
+  c[2].textContent = `${prettyBook(pickForA.book)}（${zhSel(pickForA.selection)}）`;
+  c[3].textContent = `${prettyBook(pickForB.book)}（${zhSel(pickForB.selection)}）`;
+  c[4].textContent = waterAForDisplay;
+  c[5].textContent = waterBForDisplay;
+  c[6].textContent = result.stakeB.toLocaleString();   // 始终显示，不再是“—”
   c[7].textContent = result.profit.toLocaleString();
 }
 function highlightRow(row){ row.classList.add('highlighted'); setTimeout(()=> row.classList.remove('highlighted'), 1800); }
@@ -532,61 +552,72 @@ function recalculateAllArbitrageOpportunities(){
       }
     }
   });
-  updateArbHeaders();
 }
 
 /* ------------------ 提醒（Toast） ------------------ */
 function sendAlert(result){
   const sig=result.signature; if (alertedSignatures.has(sig)) return; alertedSignatures.add(sig);
-
   const opp=result.opportunity;
+  const marketText=zhMarket(opp.market);
   const lineText=opp.line_text||(opp.line_numeric?.toString()||'');
+  const { pickForA, pickForB } = picksForABDisplay(opp);
+  const pickAStr = `${prettyBook(pickForA.book)}（${zhSel(pickForA.selection)}）`;
+  const pickBStr = `${prettyBook(pickForB.book)}（${zhSel(pickForB.selection)}）`;
   const sA=settings.stake?.amountA||10000;
 
   const title=`套利机会 · ${opp.league||''} · ${opp.event_name||''}`;
-  const msg =
-    `盘口：${marketCN(opp.market)} ${lineText}<br>` +
-    `A：${formatBookName(result.pickA.book)}（${selCN(result.pickA.selection)}） 水位 ${result.waterA}<br>` +
-    `B：${formatBookName(result.pickB.book)}（${selCN(result.pickB.selection)}） 水位 ${result.waterB}<br>` +
-    `固定A下注：${sA.toLocaleString()}，应下B：${result.stakeB.toLocaleString()}<br>` +
+  const msg=
+    `盘口：${marketText} ${lineText}<br>`+
+    `选择A：${pickAStr}　水位：${(parseFloat(pickForA.odds)-1).toFixed(3)}（A固定 ${sA.toLocaleString()}）<br>`+
+    `选择B：${pickBStr}　水位：${(parseFloat(pickForB.odds)-1).toFixed(3)}（应下 ${result.stakeB.toLocaleString()}）<br>`+
     `均衡盈利：${result.profit.toLocaleString()}`;
 
-  if (settings.notify?.toastEnabled) showToast(title, msg, 'success');
+  if (settings.notify?.toastEnabled) showToast(title,msg,'success');
 
   if (settings.notify?.systemEnabled && 'Notification' in window && Notification.permission==='granted') {
-    new Notification(title, { body:`${marketCN(opp.market)}${lineText}  盈利 ${result.profit.toLocaleString()}`, icon:'/favicon.ico' });
+    new Notification(title, { body:`${marketText}${lineText}  盈利 ${result.profit.toLocaleString()}`, icon:'/favicon.ico' });
   }
   if (settings.notify?.soundEnabled && hasUserInteracted) playNotificationSound();
 }
+
+/* 最新在上：如果没有容器则自动创建 */
 function ensureToastStack(){
-  let stack=document.getElementById('toast-stack');
+  let stack = document.getElementById('toast-stack');
   if (!stack){
-    stack=document.createElement('div');
-    stack.id='toast-stack';
-    // 最保险：即便 CSS 丢了也能显示
-    stack.style.position='fixed';
-    stack.style.right='16px';
-    stack.style.top='16px';
-    stack.style.zIndex='9999';
+    stack = document.createElement('div');
+    stack.id = 'toast-stack';
     document.body.appendChild(stack);
   }
   return stack;
 }
-function showToast(title,message,type='info'){
-  const stack=ensureToastStack();
-  const el=document.createElement('div'); el.className=`toast ${type}`;
-  el.innerHTML=`<div class="toast-title">${title}</div><div class="toast-message">${message}</div>`;
-  // 最新在最上面
-  stack.firstChild ? stack.insertBefore(el, stack.firstChild) : stack.appendChild(el);
-  const duration=(settings.notify?.toastDurationS||5)*1000;
-  setTimeout(()=>{ el.classList.add('removing'); setTimeout(()=> el.remove(),200); }, duration);
+function showToast(title, message, type='info'){
+  const stack = ensureToastStack();
+  const el = document.createElement('div');
+  el.className = `toast ${type}`;
+  el.innerHTML = `
+    <div class="toast-title">${title}</div>
+    <div class="toast-message">${message}</div>
+  `;
+  // 最新置顶
+  stack.insertBefore(el, stack.firstChild || null);
+  const duration = (settings.notify?.toastDurationS||5)*1000;
+  setTimeout(()=> {
+    el.classList.add('removing');
+    setTimeout(()=> el.remove(), 200);
+  }, duration);
 }
 function playNotificationSound(){
-  try{ const ac=new (window.AudioContext||window.webkitAudioContext)(); const o=ac.createOscillator(); const g=ac.createGain();
-    o.connect(g); g.connect(ac.destination); o.frequency.setValueAtTime(880,ac.currentTime);
-    o.frequency.setValueAtTime(1040,ac.currentTime+0.1); o.frequency.setValueAtTime(880,ac.currentTime+0.2);
-    g.gain.setValueAtTime(0.3,ac.currentTime); g.gain.exponentialRampToValueAtTime(0.01,ac.currentTime+0.3);
-    o.start(ac.currentTime); o.stop(ac.currentTime+0.3); }catch(_){}
+  try{
+    const ac=new (window.AudioContext||window.webkitAudioContext)();
+    const o=ac.createOscillator(); const g=ac.createGain();
+    o.connect(g); g.connect(ac.destination);
+    o.frequency.setValueAtTime(880,ac.currentTime);
+    o.frequency.setValueAtTime(1040,ac.currentTime+0.1);
+    o.frequency.setValueAtTime(880,ac.currentTime+0.2);
+    g.gain.setValueAtTime(0.3,ac.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.01,ac.currentTime+0.3);
+    o.start(ac.currentTime); o.stop(ac.currentTime+0.3);
+  }catch(_){}
 }
 
 /* ------------------ 行情总览 ------------------ */
@@ -623,7 +654,7 @@ function renderMarketBoard(){
   for (const r of rows){
     const tr=document.createElement('tr');
     const timeText=(r.kickoffAt||r.updatedAt)?formatTime(new Date(r.kickoffAt||r.updatedAt)):'-';
-    tr.innerHTML=`<td>${formatBookName(r.book)}</td><td>${r.league}</td><td>${r.home}</td><td>${r.away}</td><td>${r.score||'-'}</td><td>${r.ouText}</td><td>${r.ahText}</td><td>${timeText}</td>`;
+    tr.innerHTML=`<td>${r.book}</td><td>${r.league}</td><td>${r.home}</td><td>${r.away}</td><td>${r.score||'-'}</td><td>${r.ouText}</td><td>${r.ahText}</td><td>${timeText}</td>`;
     frag.appendChild(tr);
   }
   tbody.appendChild(frag);
@@ -632,15 +663,13 @@ function renderMarketBoard(){
 /* ------------------ UI 初始化 ------------------ */
 function initUI(loaded){
   settings=loaded;
-  // 标准化一次并持久化，避免结构升级后丢值
-  saveSettings();
-
   initHamburgerMenu(); initSettingsPanels(); initMarketControls();
+  ensureToastStack();                            // 确保提醒容器存在
   requestNotificationPermission();
-  updateArbHeaders();
-
   document.addEventListener('click', ()=> hasUserInteracted=true, {once:true});
   document.addEventListener('keydown', ()=> hasUserInteracted=true, {once:true});
+  saveSettings();                                // 兜底写回一次，避免偶发丢失
+  window.addEventListener('beforeunload', saveSettings); // 刷新/关闭前再保存
 }
 
 /* --- 汉堡按钮 --- */
@@ -709,7 +738,7 @@ function renderBookList(){
   sorted.forEach(book=>{
     const item=document.createElement('div'); item.className='book-item';
     const id=`chk-book-${book}`; const checked=settings.books[book] !== false;
-    item.innerHTML=`<input type="checkbox" id="${id}" ${checked?'checked':''}><label for="${id}">${formatBookName(book)}</label>`;
+    item.innerHTML=`<input type="checkbox" id="${id}" ${checked?'checked':''}><label for="${id}">${prettyBook(book)}</label>`;
     const chk=item.querySelector('input');
     chk.addEventListener('change', ()=>{
       settings.books[book]=chk.checked; saveSettings();
@@ -747,7 +776,7 @@ function renderRebateSettings(){
   function fillOptions(sel,current){
     sel.innerHTML='';
     const opt0=document.createElement('option'); opt0.value=''; opt0.textContent = enabled.length ? '— 请选择 —' : '请先在书商面板勾选书商'; sel.appendChild(opt0);
-    enabled.forEach(b=>{ const o=document.createElement('option'); o.value=b; o.textContent=formatBookName(b); sel.appendChild(o); });
+    enabled.forEach(b=>{ const o=document.createElement('option'); o.value=b; o.textContent=prettyBook(b); sel.appendChild(o); });
     if (current && enabled.includes(normBookKey(current))) sel.value=normBookKey(current);
   }
 
@@ -758,10 +787,7 @@ function renderRebateSettings(){
   saveBtn.addEventListener('click', ()=>{
     settings.rebateA={ book:selA.value||'', rate:parseFloat(inpA.value)||0 };
     settings.rebateB={ book:selB.value||'', rate:parseFloat(inpB.value)||0 };
-    saveSettings();
-    updateArbHeaders();        // 表头跟随 A/B 选择变化
-    showToast('保存成功','已更新 A/B 平台返水','success');
-    recalculateAllArbitrageOpportunities();
+    saveSettings(); showToast('保存成功','已更新 A/B 平台返水','success'); recalculateAllArbitrageOpportunities();
   });
 }
 function updateABookOptions(){
@@ -769,7 +795,7 @@ function updateABookOptions(){
   const prev=sel.value; sel.innerHTML='';
   const enabled=getEnabledBooks();
   if (enabled.length===0){ const opt=document.createElement('option'); opt.value=''; opt.textContent='请先选择书商'; opt.disabled=true; sel.appendChild(opt); return; }
-  enabled.forEach(b=>{ const o=document.createElement('option'); o.value=b; o.textContent=formatBookName(b); sel.appendChild(o); });
+  enabled.forEach(b=>{ const o=document.createElement('option'); o.value=b; o.textContent=prettyBook(b); sel.appendChild(o); });
   if (enabled.includes(prev)) sel.value=prev; else { sel.value=enabled[0]; settings.stake.aBook=enabled[0]; saveSettings(); }
 }
 
@@ -809,4 +835,74 @@ function initDatasourcePanel(){
     parent && parent.addEventListener('click', (e)=>{ if (e.target!==useMockChk){ e.preventDefault(); useMockChk.checked=!useMockChk.checked; syncMock(); }});
   }
 
-  if (test
+  if (testBtn) testBtn.addEventListener('click', ()=>{
+    if (settings.datasource?.useMock){ showToast('连接测试','当前为模拟模式，无需连接服务器','success'); return; }
+    testBtn.disabled=true; testBtn.textContent='测试中...';
+    let url;
+    if (settings.datasource?.wsMode==='custom' && (settings.datasource?.wsUrl||'').trim()){ url=settings.datasource.wsUrl.trim(); }
+    else { const protocol=location.protocol==='https:'?'wss':'ws'; url=`${protocol}://${location.host}/ws/opps`; }
+    const t=new WebSocket(url);
+    const timeout=setTimeout(()=>{ try{t.close();}catch(_){ } testBtn.disabled=false; testBtn.textContent='测试连接'; showToast('连接测试','连接超时','error'); },5000);
+    t.onopen=()=>{ clearTimeout(timeout); try{t.close();}catch(_){ } testBtn.disabled=false; testBtn.textContent='测试连接'; showToast('连接测试','连接成功','success'); };
+    t.onerror=()=>{ clearTimeout(timeout); testBtn.disabled=false; testBtn.textContent='测试连接'; showToast('连接测试','连接失败','error'); };
+  });
+  reconnectBtn && reconnectBtn.addEventListener('click', ()=>{ reconnectNow(); hideReconnectButton(); });
+
+  // 如果开关已经是“开”，初始化后立即进入模拟（不等事件）
+  if (useMockChk && useMockChk.checked) {
+    if (!settings.datasource.useMock) { settings.datasource.useMock = true; saveSettings(); }
+    queueMicrotask(()=> enterMockMode());
+  }
+}
+function showReconnectButton(){ const b=document.getElementById('reconnect-now'); if (b) b.style.display='block'; }
+function hideReconnectButton(){ const b=document.getElementById('reconnect-now'); if (b) b.style.display='none'; }
+
+function updateStakeInputs(){ const s=settings.stake||{}; const amountAInput=document.getElementById('amount-a'); const minProfitInput=document.getElementById('min-profit'); if (amountAInput) amountAInput.value=s.amountA||10000; if (minProfitInput) minProfitInput.value=s.minProfit||0; updateABookOptions(); }
+function updateNotifyInputs(){
+  const n=settings.notify||{}; const systemNotify=document.getElementById('system-notify'); const soundNotify=document.getElementById('sound-notify'); const toastNotify=document.getElementById('toast-notify'); const toastDuration=document.getElementById('toast-duration'); const autoHideRow=document.getElementById('auto-hide-row');
+  if (systemNotify) systemNotify.checked=!!n.systemEnabled; if (soundNotify) soundNotify.checked=n.soundEnabled!==false; if (toastNotify) toastNotify.checked=n.toastEnabled!==false;
+  if (toastDuration) toastDuration.value=n.toastDurationS||5; if (autoHideRow) autoHideRow.value=n.autoHideRowS||30;
+}
+
+/* 面板状态 */
+function loadPanelStates(){
+  try{ const raw=localStorage.getItem('panel_state_v1'); const s=raw?JSON.parse(raw):{};
+    ['panel-datasource','panel-books','panel-rebates','panel-stake','panel-notify','panel-marketboard'].forEach(id=>{
+      const el=document.getElementById(id); if (!el) return; if (id==='panel-marketboard') el.open=s[id]===true; else el.open=s[id]!==false;
+    });
+  }catch(_){}
+}
+function savePanelStates(){
+  try{ const s={}; ['panel-datasource','panel-books','panel-rebates','panel-stake','panel-notify','panel-marketboard'].forEach(id=>{ const el=document.getElementById(id); if (el) s[id]=!!el.open; }); localStorage.setItem('panel_state_v1', JSON.stringify(s)); }catch(_){}
+}
+
+/* 市场控制面板 */
+function initMarketControls(){
+  const sortByLeagueBtn=document.querySelector('#sortByLeague, [data-sort="league"]');
+  const sortByTimeBtn=document.querySelector('#sortByTime, [data-sort="time"]');
+  const collapseBtn=document.getElementById('market-collapse-btn');
+  const marketPanel=document.getElementById('panel-marketboard');
+
+  if (sortByLeagueBtn) sortByLeagueBtn.addEventListener('click', ()=>{ sortMode='league'; sortByLeagueBtn.classList.add('active'); sortByTimeBtn && sortByTimeBtn.classList.remove('active'); renderMarketBoard(); });
+  if (sortByTimeBtn)   sortByTimeBtn.addEventListener('click', ()=>{ sortMode='time'; sortByTimeBtn.classList.add('active'); sortByLeagueBtn && sortByLeagueBtn.classList.remove('active'); renderMarketBoard(); });
+  if (collapseBtn && marketPanel) collapseBtn.addEventListener('click', (e)=>{ e.preventDefault(); e.stopPropagation(); marketPanel.open=!marketPanel.open; savePanelStates(); });
+}
+
+/* 其它工具 */
+function requestNotificationPermission(){ if ('Notification' in window && Notification.permission==='default') Notification.requestPermission(); }
+function updateConnectionStatus(status){
+  const badge=document.getElementById('statusBadge'); const alert=document.getElementById('connectionError'); if (!badge || !alert) return;
+  if (settings.datasource?.useMock){ badge.className='status-badge connected'; badge.textContent='已连接（模拟）'; alert.style.display='none'; return; }
+  badge.className = `status-badge ${status}`;
+  if (status==='connected'){ badge.textContent='已连接'; alert.style.display='none'; }
+  else if (status==='connecting'){ badge.textContent='连接中...'; alert.style.display='none'; }
+  else { badge.textContent='重连中...'; alert.style.display='block'; }
+}
+function updateLastUpdateTime(){ const el=document.getElementById('lastUpdateTime'); if (el) el.textContent = formatTime(); }
+
+/* ------------------ 启动入口 ------------------ */
+document.addEventListener('DOMContentLoaded', ()=>{
+  const loaded=loadSettings();
+  initUI(loaded);
+  connectWS(); // 如果已勾选“使用模拟数据”，会直接进入模拟数据模式
+});
