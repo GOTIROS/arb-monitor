@@ -1,4 +1,3 @@
-
 /* =======================================================
    arb-monitor — public/app.js
    完整版（直接替换）
@@ -52,8 +51,12 @@ const DEFAULT_SETTINGS = {
   },
   books: {             // 动态渲染
   },
-  rebates: {
+  rebates: {           // （兼容保留，不再用于计算）
   },
+  // === 新增：A/B 平台返水（项目二） ===
+  rebateA: { book: '', rate: 0 },
+  rebateB: { book: '', rate: 0 },
+
   stake: {
     aBook: '',
     amountA: 10000,
@@ -80,6 +83,7 @@ function loadSettings() {
       datasource: { ...DEFAULT_SETTINGS.datasource, ...(loaded.datasource||{}) },
       books:      { ...DEFAULT_SETTINGS.books,      ...(loaded.books||{}) },
       rebates:    { ...DEFAULT_SETTINGS.rebates,    ...(loaded.rebates||{}) },
+      // rebateA/B 为顶层字段，...loaded 已合并
       stake:      { ...DEFAULT_SETTINGS.stake,      ...(loaded.stake||{}) },
       notify:     { ...DEFAULT_SETTINGS.notify,     ...(loaded.notify||{}) }
     };
@@ -118,7 +122,7 @@ function addDiscoveredBook(book) {
       saveSettings();
     }
     renderBookList();
-    renderRebateSettings();
+    renderRebateSettings();   // 项目二：A/B 返水 UI
     updateABookOptions();
   }
 }
@@ -140,6 +144,33 @@ function formatTime(date=new Date()) {
   return date.toLocaleTimeString('zh-CN', {
     hour12:false, hour:'2-digit', minute:'2-digit', second:'2-digit'
   });
+}
+
+/* ------------------ 新增工具（项目二） ------------------ */
+// 当前“已勾选”的书商列表（由书商选择面板决定）
+function getEnabledBooks() {
+  return Array.from(discoveredBooks).filter(b => settings.books[b] !== false).sort();
+}
+
+// 若 A/B 已选书商被取消勾选，则清空对应选择
+function normalizeRebateABSelections() {
+  const enabled = new Set(getEnabledBooks());
+  if (settings.rebateA?.book && !enabled.has(normBookKey(settings.rebateA.book))) {
+    settings.rebateA.book = '';
+  }
+  if (settings.rebateB?.book && !enabled.has(normBookKey(settings.rebateB.book))) {
+    settings.rebateB.book = '';
+  }
+  saveSettings();
+}
+
+// 依据 A/B 平台配置，返回某书商的返水（turnover 比例）
+function getRebateRateForBook(bookKey) {
+  const a = settings.rebateA || {};
+  const b = settings.rebateB || {};
+  if (a.book && normBookKey(a.book) === bookKey) return parseFloat(a.rate)||0;
+  if (b.book && normBookKey(b.book) === bookKey) return parseFloat(b.rate)||0;
+  return 0;
 }
 
 /* ------------------ WebSocket ------------------ */
@@ -550,6 +581,10 @@ function updateMarketBoard(opp) {
   }
 }
 
+/* === 修改点（项目二 & 项目一）：
+   1) 移除“按勾选书商过滤套利计算”的限制（项目一要求勾选只影响盘口总览）。
+   2) 返水来源改为 A/B 平台选择（settings.rebateA / settings.rebateB），按书商匹配（turnover）。
+=== */
 function calculateArbitrage(opp) {
   if (!opp?.pickA || !opp?.pickB) return null;
 
@@ -557,11 +592,7 @@ function calculateArbitrage(opp) {
   const bookB = normBookKey(opp.pickB.book);
   const aBook  = normBookKey(settings.stake?.aBook||'');
 
-  // 只计算勾选书商（未显式 false 都算启用）
-  const enabledA = settings.books[bookA] !== false;
-  const enabledB = settings.books[bookB] !== false;
-  if (!enabledA || !enabledB) return null;
-
+  // 不再用勾选书商限制套利计算（项目一）
   let pickA, pickB, sideA, sideB, aInvolved=false;
   if (bookA===aBook) {
     aInvolved=true; pickA=opp.pickA; pickB=opp.pickB; sideA='A'; sideB='B';
@@ -576,27 +607,21 @@ function calculateArbitrage(opp) {
   const sA = parseInt(settings.stake?.amountA)||10000;
   if (oA<=1 || oB<=1) return null;
 
-  const ra = settings.rebates?.[normBookKey(pickA.book)] || {type:'turnover', rate:0};
-  const rb = settings.rebates?.[normBookKey(pickB.book)] || {type:'turnover', rate:0};
-  const rA = ra.rate||0, rB=rb.rate||0, tA=ra.type||'turnover', tB=rb.type||'turnover';
+  // A/B 平台返水（turnover），按书商匹配（项目二）
+  const rA = getRebateRateForBook(normBookKey(pickA.book));
+  const rB = getRebateRateForBook(normBookKey(pickB.book));
+  const tA = 'turnover', tB = 'turnover';
 
   let sB;
   if (tA==='turnover' && tB==='turnover') {
     sB = sA * oA / oB;
-  } else if (tA==='net_loss' && tB==='net_loss') {
-    const d = oB - rB; if (d<=0) return null;
-    sB = sA * (oA - rA) / d;
-  } else if (tA==='turnover' && tB==='net_loss') {
-    const d = oB - rB; if (d<=0) return null;
-    sB = sA * oA / d;
-  } else if (tA==='net_loss' && tB==='turnover') {
-    sB = sA * (oA - rA) / oB;
   } else {
-    return null;
+    // 兼容保留（如果未来扩展 net_loss，可在此继续分支）
+    sB = sA * oA / oB;
   }
   if (sB<=0) return null;
 
-  const profit = sA*oA - (sA+sB) + (tA==='turnover'? rA*sA : 0) + rB*sB;
+  const profit = sA*oA - (sA+sB) + (tA==='turnover'? rA*sA : 0) + (tB==='turnover'? rB*sB : 0);
   const minProfit = parseInt(settings.stake?.minProfit)||0;
 
   return {
@@ -823,7 +848,7 @@ function renderMarketBoard() {
     return;
   }
 
-  // 当前启用书商：未显式 false 都算启用
+  // 当前启用书商：未显式 false 都算启用 —— 仅影响盘口总览（项目一）
   const enabled = new Set(
     Array.from(discoveredBooks).filter(b => settings.books[b] !== false).map(b=>normBookKey(b))
   );
@@ -980,7 +1005,7 @@ function initSettingsPanels() {
   initDatasourcePanel();
 
   renderBookList();
-  renderRebateSettings();
+  renderRebateSettings();   // 项目二：A/B 返水 UI
 
   updateStakeInputs();
   const aBookSelect = document.getElementById('a-book');
@@ -1070,13 +1095,16 @@ function renderBookList() {
     chk.addEventListener('change', ()=>{
       settings.books[book] = chk.checked;
       saveSettings();
-      // A 平台自动校正
+
+      // A 平台下拉、A/B 返水下拉同步校正
       const currentABook = normBookKey(settings.stake?.aBook||'');
       if (!chk.checked && currentABook===book) {
-        const enabled = Array.from(discoveredBooks).filter(b => settings.books[b] !== false);
+        const enabled = getEnabledBooks();
         settings.stake.aBook = enabled[0] || '';
         updateABookOptions();
       }
+      normalizeRebateABSelections();  // 新增：勾选变化时同步校正 A/B 返水选择
+
       renderRebateSettings();
       renderMarketBoard();
       recalculateAllArbitrageOpportunities();
@@ -1085,56 +1113,87 @@ function renderBookList() {
   });
 }
 
+/* === 修改：返水设置面板（项目二）只提供 A/B 两个平台 === */
 function renderRebateSettings() {
   const container = document.querySelector('#panel-rebates .panel-content');
   if (!container) return;
   container.innerHTML = '';
 
-  if (discoveredBooks.size===0) {
-    container.innerHTML = '<div class="no-books-message">暂无书商数据</div>';
-    return;
-  }
-  // 未显式 false 都显示
-  const enabled = Array.from(discoveredBooks).filter(b => settings.books[b] !== false).sort();
-  if (enabled.length===0) {
-    container.innerHTML = '<div class="no-books-message">请先选择书商</div>';
-    return;
+  const enabled = getEnabledBooks();
+
+  // A 平台
+  const grpA = document.createElement('div');
+  grpA.className = 'rebate-group';
+  grpA.innerHTML = `
+    <h4>A 平台</h4>
+    <div class="form-row">
+      <label>选择书商</label>
+      <select id="rebateA_book"></select>
+    </div>
+    <div class="form-row">
+      <label>返水（如 0.006）</label>
+      <input id="rebateA_rate" type="number" step="0.0001" min="0" placeholder="0.006">
+    </div>
+  `;
+  container.appendChild(grpA);
+
+  // B 平台
+  const grpB = document.createElement('div');
+  grpB.className = 'rebate-group';
+  grpB.innerHTML = `
+    <h4>B 平台</h4>
+    <div class="form-row">
+      <label>选择书商</label>
+      <select id="rebateB_book"></select>
+    </div>
+    <div class="form-row">
+      <label>返水（如 0.006）</label>
+      <input id="rebateB_rate" type="number" step="0.0001" min="0" placeholder="0.006">
+    </div>
+  `;
+  container.appendChild(grpB);
+
+  // 保存按钮
+  const saveBtn = document.createElement('button');
+  saveBtn.id = 'saveRebatesABBtn';
+  saveBtn.className = 'test-connection-btn';
+  saveBtn.textContent = '保存返水设置';
+  container.appendChild(saveBtn);
+
+  // 填充下拉
+  function fillOptions(sel, current) {
+    sel.innerHTML = '';
+    const opt0 = document.createElement('option');
+    opt0.value=''; opt0.textContent = enabled.length ? '— 请选择 —' : '请先在书商面板勾选书商';
+    sel.appendChild(opt0);
+    enabled.forEach(b=>{
+      const o = document.createElement('option');
+      o.value = b;
+      o.textContent = b.charAt(0).toUpperCase()+b.slice(1);
+      sel.appendChild(o);
+    });
+    if (current && enabled.includes(normBookKey(current))) {
+      sel.value = normBookKey(current);
+    }
   }
 
-  enabled.forEach(book => {
-    const r = settings.rebates[book] || { type:'turnover', rate:0.006 };
-    const group = document.createElement('div');
-    group.className = 'rebate-group';
-    group.innerHTML = `
-      <h4>${book.charAt(0).toUpperCase()+book.slice(1)}</h4>
-      <div class="form-row">
-        <label>类型：</label>
-        <select id="${book}-type">
-          <option value="turnover" ${r.type==='turnover'?'selected':''}>Turnover</option>
-          <option value="net_loss" ${r.type==='net_loss'?'selected':''}>Net Loss</option>
-        </select>
-      </div>
-      <div class="form-row">
-        <label>比例：</label>
-        <input type="number" id="${book}-rate" step="0.001" min="0" max="1" value="${r.rate}">
-      </div>
-    `;
-    container.appendChild(group);
+  const selA = grpA.querySelector('#rebateA_book');
+  const inpA = grpA.querySelector('#rebateA_rate');
+  const selB = grpB.querySelector('#rebateB_book');
+  const inpB = grpB.querySelector('#rebateB_rate');
 
-    const typeSel = group.querySelector(`#${book}-type`);
-    const rateInp = group.querySelector(`#${book}-rate`);
-    typeSel.addEventListener('change', ()=>{
-      settings.rebates[book] = settings.rebates[book]||{};
-      settings.rebates[book].type = typeSel.value;
-      saveSettings();
-      recalculateAllArbitrageOpportunities();
-    });
-    rateInp.addEventListener('input', ()=>{
-      settings.rebates[book] = settings.rebates[book]||{};
-      settings.rebates[book].rate = parseFloat(rateInp.value)||0;
-      saveSettings();
-      recalculateAllArbitrageOpportunities();
-    });
+  fillOptions(selA, settings.rebateA?.book || '');
+  fillOptions(selB, settings.rebateB?.book || '');
+  inpA.value = settings.rebateA?.rate ?? '';
+  inpB.value = settings.rebateB?.rate ?? '';
+
+  // 交互：保存
+  saveBtn.addEventListener('click', ()=>{
+    settings.rebateA = { book: selA.value || '', rate: parseFloat(inpA.value)||0 };
+    settings.rebateB = { book: selB.value || '', rate: parseFloat(inpB.value)||0 };
+    saveSettings();
+    showToast('保存成功','已更新 A/B 平台返水','success');
+    recalculateAllArbitrageOpportunities();
   });
 }
 
@@ -1144,7 +1203,7 @@ function updateABookOptions() {
   const prev = sel.value;
   sel.innerHTML = '';
 
-  const enabled = Array.from(discoveredBooks).filter(b=>settings.books[b] !== false).sort();
+  const enabled = getEnabledBooks();
   if (enabled.length===0) {
     const opt = document.createElement('option');
     opt.value=''; opt.textContent='请先选择书商'; opt.disabled=true;
