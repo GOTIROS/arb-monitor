@@ -146,7 +146,24 @@ function connectWS() {
   try {
     ws = new WebSocket(wsUrl);
     ws.onopen = () => { wsReconnectAttempts=0; updateConnectionStatus('connected'); startHeartbeatMonitor(); };
-    ws.onmessage = (ev) => { try { handleWebSocketMessage(JSON.parse(ev.data)); } catch(e){ console.error('解析消息失败:', e); } };
+
+    // 兼容：字符串/Blob 消息都可解析为 JSON
+    ws.onmessage = async (ev) => {
+      try {
+        let text;
+        if (typeof ev.data === 'string') {
+          text = ev.data;
+        } else if (ev.data instanceof Blob && typeof ev.data.text === 'function') {
+          text = await ev.data.text();
+        } else {
+          text = String(ev.data);
+        }
+        handleWebSocketMessage(JSON.parse(text));
+      } catch(e) {
+        console.error('解析消息失败:', e);
+      }
+    };
+
     ws.onclose = () => {
       if (settings.datasource?.useMock) return;
       updateConnectionStatus('reconnecting'); stopHeartbeatMonitor(); scheduleReconnect();
