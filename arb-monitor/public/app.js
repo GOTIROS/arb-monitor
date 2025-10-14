@@ -1,6 +1,6 @@
 /* =======================================================
    arb-monitor — public/app.js
-   完整版（直接替换）
+   替换版（去虚拟数据 & 稳定心跳）
    ======================================================= */
 'use strict';
 
@@ -8,8 +8,10 @@
 let ws = null;
 let wsReconnectAttempts = 0;
 let wsReconnectTimer = null;
+
 let lastHeartbeat = 0;
 let heartbeatTimer = null;
+const HEARTBEAT_TIMEOUT_MS = 120000; // 2 分钟：收到任何有效消息即刷新心跳
 
 let settings = {};
 let marketBoard = new Map();       // eventKey -> {league, home, away, score, books:Set, ouMap:Map, ahMap:Map, updatedAt, kickoffAt}
@@ -26,27 +28,6 @@ const ALERT_TTL_MS = 15000;    // 软去重窗口：15s
 let sortMode = 'time'; // 'time' | 'league'
 const rowOrder = new Map(); // key: eventKey|book -> stable index
 let rowSeq = 0;
-
-/* ------------------ 模拟数据 ------------------ */
-let mockTimer = null;
-const MOCK_BOOKS = [
-  'singbet','parimatch','bet365','pinnacle','sbobet',
-  'williamhill','unibet','dafabet','x1bet','marathon'
-];
-const MOCK_FIXTURES = [
-  { league:'英超', home:'阿森纳',   away:'曼城' },
-  { league:'英超', home:'切尔西',   away:'利物浦' },
-  { league:'西甲', home:'巴塞罗那', away:'皇家马德里' },
-  { league:'德甲', home:'拜仁慕尼黑', away:'多特蒙德' },
-  { league:'意甲', home:'AC米兰',   away:'国际米兰' },
-  { league:'法甲', home:'巴黎圣日耳曼', away:'马赛' },
-  { league:'中超', home:'上海海港', away:'北京国安' },
-  { league:'葡超', home:'本菲卡',   away:'波尔图' },
-  { league:'荷甲', home:'阿贾克斯', away:'埃因霍温' },
-  { league:'土超', home:'加拉塔萨雷', away:'费内巴切' }
-];
-function rand(arr){ return arr[Math.floor(Math.random()*arr.length)]; }
-function randFloat(min, max, digits=2){ return +(min + Math.random()*(max-min)).toFixed(digits); }
 
 /* ------------------ 常用函数 ------------------ */
 function rowKey(eventKey, book) { return `${eventKey}|${(book||'').toLowerCase()}`; }
@@ -93,7 +74,7 @@ function loadSettings() {
     return {
       ...DEFAULT_SETTINGS,
       ...loaded,
-      datasource: { ...DEFAULT_SETTINGS.datasource, ...(loaded.datasource||{}) },
+      datasource: { ...DEFAULT_SETTINGS.datasource, ...(loaded.datasource||{}), useMock:false }, // 强制关闭模拟
       books:      { ...DEFAULT_SETTINGS.books,      ...(loaded.books||{}) },
       rebates:    { ...DEFAULT_SETTINGS.rebates,    ...(loaded.rebates||{}) },
       rebateA:    { ...DEFAULT_SETTINGS.rebateA,    ...(loaded.rebateA||{}) },
@@ -103,7 +84,7 @@ function loadSettings() {
     };
   } catch(e) {
     console.error('加载设置失败:', e);
-    return DEFAULT_SETTINGS;
+    return { ...DEFAULT_SETTINGS, datasource:{...DEFAULT_SETTINGS.datasource, useMock:false} };
   }
 }
 function saveSettings(){ try{ localStorage.setItem('arb_settings_v1', JSON.stringify(settings)); }catch(e){ console.error(e);} }
@@ -126,9 +107,9 @@ function clearDiscoveredBooks(){ discoveredBooks.clear(); renderBookList(); rend
 /* ------------------ 工具函数 ------------------ */
 function getEventKey(opp){ return `${opp.league || ''}|${opp.event_name || ''}`; }
 
-/* ------------------ WebSocket / 模拟数据 切换 ------------------ */
+/* ------------------ WebSocket 连接（移除模拟分支） ------------------ */
 function connectWS() {
-  if (settings.datasource?.useMock) { enterMockMode(); return; }
+  // 不再支持 useMock，统一直连后端
   if (ws && (ws.readyState===WebSocket.CONNECTING || ws.readyState===WebSocket.OPEN)) return;
   if (settings.datasource?.wsMode==='custom' && !(settings.datasource?.wsUrl||'').trim()) {
     updateConnectionStatus('connecting'); return;
@@ -147,7 +128,7 @@ function connectWS() {
     ws = new WebSocket(wsUrl);
     ws.onopen = () => { wsReconnectAttempts=0; updateConnectionStatus('connected'); startHeartbeatMonitor(); };
 
-    // 兼容：字符串/Blob 消息都可解析为 JSON
+    // 兼容字符串/Blob，并在成功解析后刷新心跳
     ws.onmessage = async (ev) => {
       try {
         let text;
@@ -158,16 +139,15 @@ function connectWS() {
         } else {
           text = String(ev.data);
         }
-        handleWebSocketMessage(JSON.parse(text));
+        const obj = JSON.parse(text);
+        lastHeartbeat = Date.now();                 // ★ 任何有效消息都刷新心跳
+        handleWebSocketMessage(obj);
       } catch(e) {
         console.error('解析消息失败:', e);
       }
     };
 
-    ws.onclose = () => {
-      if (settings.datasource?.useMock) return;
-      updateConnectionStatus('reconnecting'); stopHeartbeatMonitor(); scheduleReconnect();
-    };
+    ws.onclose = () => { updateConnectionStatus('reconnecting'); stopHeartbeatMonitor(); scheduleReconnect(); };
     ws.onerror = (err) => { console.error('WS 错误:', err); };
   } catch (err) {
     console.error('创建 WS 失败:', err);
@@ -175,100 +155,19 @@ function connectWS() {
   }
 }
 
-function enterMockMode(){
-  if (ws) { try { ws.onopen = ws.onmessage = ws.onerror = ws.onclose = null; ws.close(); } catch(_){}
-    ws = null; }
-  if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer=null; }
-  stopHeartbeatMonitor();
-
-  marketBoard.clear(); clearArbitrageTable(); clearDiscoveredBooks();
-  MOCK_BOOKS.forEach(addDiscoveredBook);
-  updateABookOptions();
-  normalizeRebateABSelections();
-
-  // 初始化快照（静默）
-  const initial = [];
-  for (let i=0;i<12;i++){
-    const f = rand(MOCK_FIXTURES);
-    const mkt = Math.random()<0.5?'ou':'ah';
-    const ouLines = ['2','2/2.5','2.25','2.5','2.75','3','3/3.5'];
-    const ahLines = ['-1','-0.75','-0.5','0','+0.25','+0.5','+0.75','+1'];
-    const b1 = rand(MOCK_BOOKS); let b2 = rand(MOCK_BOOKS); while(b2===b1) b2 = rand(MOCK_BOOKS);
-    const line = mkt==='ou' ? rand(ouLines) : rand(ahLines);
-    const o1 = randFloat(1.72, 2.18, 2), o2 = randFloat(1.72, 2.18, 2);
-    const opp = {
-      event_id:`${f.league}-${f.home}-${f.away}`,
-      event_name:`${f.home} vs ${f.away}`,
-      league:f.league, market:mkt, line_text:line,
-      score:`${Math.floor(Math.random()*3)}:${Math.floor(Math.random()*3)}`,
-      kickoffAt: Date.now() + Math.floor(Math.random()*7200)*1000
-    };
-    if (mkt==='ou'){ opp.pickA={book:b1,selection:'over',odds:o1}; opp.pickB={book:b2,selection:'under',odds:o2}; }
-    else { opp.pickA={book:b1,selection:'home',odds:o1}; opp.pickB={book:b2,selection:'away',odds:o2}; }
-    initial.push(opp);
-  }
-  handleSnapshot(initial);
-  updateConnectionStatus('connected');
-
-  // 每 1.5 秒推送一条（会触发提醒）
-  stopMockData();
-  mockTimer = setInterval(pushOneMock, 1500);
-
-  // 立即强制一条 A/B 对碰的“必弹”机会（2.10/2.10）
-  emitOneABPairMock();
-
-  showToast('模拟数据', '已启动 10 书商的随机盘口流', 'success');
-}
-
-function emitOneABPairMock(){
-  const a = (settings.rebateA?.book||'').toLowerCase();
-  const b = (settings.rebateB?.book||'').toLowerCase();
-  if (!a || !b) return; // 未设置 A/B 则跳过
-  const f = rand(MOCK_FIXTURES);
-  const mkt = Math.random()<0.5 ? 'ou' : 'ah';
-  const line = mkt==='ou' ? '2.5' : '0';
-  const o1 = 2.10, o2 = 2.10;
-  const opp = {
-    event_id:`ABPAIR-${Date.now()}`,
-    event_name:`${f.home} vs ${f.away}`,
-    league:f.league, market:mkt, line_text:line,
-    score:`${Math.floor(Math.random()*3)}:${Math.floor(Math.random()*3)}`,
-    kickoffAt: Date.now() + Math.floor(Math.random()*7200)*1000
-  };
-  if (mkt==='ou'){ opp.pickA={book:a,selection:'over',odds:o1}; opp.pickB={book:b,selection:'under',odds:o2}; }
-  else { opp.pickA={book:a,selection:'home',odds:o1}; opp.pickB={book:b,selection:'away',odds:o2}; }
-  processOpportunity(opp, true);
-  renderMarketBoard(); updateLastUpdateTime();
-}
-
-function pushOneMock(){
-  const f = rand(MOCK_FIXTURES);
-  const mkt = Math.random()<0.5 ? 'ou' : 'ah';
-  const ouLines = ['2','2/2.5','2.25','2.5','2.75','3','3/3.5'];
-  const ahLines = ['-1','-0.75','-0.5','0','+0.25','+0.5','+0.75','+1'];
-  const b1 = rand(MOCK_BOOKS); let b2 = rand(MOCK_BOOKS); while(b2===b1) b2 = rand(MOCK_BOOKS);
-  const line = mkt==='ou' ? rand(ouLines) : rand(ahLines);
-  const o1 = randFloat(1.72, 2.18, 2), o2 = randFloat(1.72, 2.18, 2);
-  const opp = {
-    event_id:`${f.league}-${f.home}-${f.away}`,
-    event_name:`${f.home} vs ${f.away}`,
-    league:f.league, market:mkt, line_text:line,
-    score:`${Math.floor(Math.random()*3)}:${Math.floor(Math.random()*3)}`,
-    kickoffAt: Date.now() + Math.floor(Math.random()*7200)*1000
-  };
-  if (mkt==='ou'){ opp.pickA={book:b1,selection:'over',odds:o1}; opp.pickB={book:b2,selection:'under',odds:o2}; }
-  else { opp.pickA={book:b1,selection:'home',odds:o1}; opp.pickB={book:b2,selection:'away',odds:o2}; }
-  processOpportunity(opp, true);
-  renderMarketBoard(); updateLastUpdateTime();
-}
-function stopMockData(){ if (mockTimer) { clearInterval(mockTimer); mockTimer=null; } }
-
 function reconnectNow(){ if (ws) ws.close(); if (wsReconnectTimer){ clearTimeout(wsReconnectTimer); wsReconnectTimer=null; } wsReconnectAttempts=0; setTimeout(connectWS, 120); }
 function scheduleReconnect(){ if (wsReconnectTimer) clearTimeout(wsReconnectTimer); wsReconnectAttempts++; const d=Math.min(30000, Math.pow(2, wsReconnectAttempts-1)*1000); wsReconnectTimer=setTimeout(connectWS, d); }
-function startHeartbeatMonitor(){ stopHeartbeatMonitor(); heartbeatTimer=setInterval(()=>{ if (lastHeartbeat && (Date.now()-lastHeartbeat>30000)) { try{ ws && ws.close(); }catch(_){}} }, 5000); }
+function startHeartbeatMonitor(){
+  stopHeartbeatMonitor();
+  heartbeatTimer=setInterval(()=>{
+    if (lastHeartbeat && (Date.now()-lastHeartbeat>HEARTBEAT_TIMEOUT_MS)) {
+      try{ ws && ws.close(); }catch(_){}
+    }
+  }, 5000);
+}
 function stopHeartbeatMonitor(){ if (heartbeatTimer){ clearInterval(heartbeatTimer); heartbeatTimer=null; } }
 
-/* ------------------ 消息处理（兼容层） ------------------ */
+/* ------------------ 消息处理（归一化） ------------------ */
 function _num(v){ const n=(typeof v==='string')?parseFloat(v):Number(v); return Number.isFinite(n)?n:undefined; }
 function _str(v){ if (v==null) return ''; return (typeof v==='string')?v:String(v); }
 function _pick(obj, keys, fallback){ for (const k of keys){ if (obj && obj[k]!=null && obj[k]!=='') return obj[k]; } return fallback; }
@@ -289,11 +188,11 @@ function _normMarket(m,pA,pB){
 }
 function _normalizeOpp(raw){
   if (!raw || typeof raw!=='object') return null;
-  const league=_str(_pick(raw,['league','leagueName','league_name','league_cn','联赛','联赛名'],'')); 
-  const home=_str(_pick(raw,['home','homeTeam','home_name','主队','team_a'],'')); 
-  const away=_str(_pick(raw,['away','awayTeam','away_name','客队','team_b'],'')); 
-  const eventName=_str(_pick(raw,['event_name','eventName','赛事','比赛','match_name'], (home&&away)?`${home} vs ${away}`:''));
-  const lineText=_str(_pick(raw,['line_text','lineText','line','handicap','ah','ou','total','盘口','大小'],'')); 
+  const league=_str(_pick(raw,['league','leagueName','league_name','league_cn'],'')); 
+  const home=_str(_pick(raw,['home','homeTeam','home_name'],'')); 
+  const away=_str(_pick(raw,['away','awayTeam','away_name'],'')); 
+  const eventName=_str(_pick(raw,['event_name','eventName','match_name'], (home&&away)?`${home} vs ${away}`:''));
+  const lineText=_str(_pick(raw,['line_text','lineText','line','handicap','ah','ou','total'],'')); 
   const lineNum=_num(_pick(raw,['line_numeric','lineNum','lineValue','total_points','handicap_value'],undefined));
   const overOdds=_num(_pick(raw,['over_odds','o_odds','odds_over','overOdds'],undefined));
   const underOdds=_num(_pick(raw,['under_odds','u_odds','odds_under','underOdds'],undefined));
@@ -324,12 +223,12 @@ function _normalizeOpp(raw){
   if (!pickA || !pickB) return null;
   if (!(pickA.odds>1 && pickB.odds>1)) return null;
 
-  const market=_normMarket(_pick(raw,['market','market_type','mkt','type','玩法'],''), pickA, pickB);
+  const market=_normMarket(_pick(raw,['market','market_type','mkt','type'],''), pickA, pickB);
   const eventId=_pick(raw,['event_id','eventId','match_id','fid','mid','id'], `${home}-${away}-${lineText}`);
 
   return {
     event_id:eventId, event_name:eventName, league,
-    score:_str(_pick(raw,['score','sc','比分'],'')),
+    score:_str(_pick(raw,['score','sc'],'')),
     market, line_text: lineText || (lineNum!=null?String(lineNum):''), line_numeric:(lineNum!=null?lineNum:undefined),
     pickA, pickB,
     kickoffAt:_pick(raw,['kickoffAt','kickoff_at','kickoff','matchTime','match_time','start_time','start_ts','startTime'],undefined)
@@ -463,7 +362,7 @@ function isABPairOpp(opp){
   return (x===a && y===b) || (x===b && y===a);
 }
 
-/* 计算套利（提醒只在 A/B 对碰时触发；表格也仅显示 A/B 对碰） */
+/* 下注计算与表格（与之前一致） */
 function calculateArbitrage(opp){
   if (!opp?.pickA || !opp?.pickB) return null;
 
@@ -477,7 +376,6 @@ function calculateArbitrage(opp){
     ((bookA===rebateABook && bookB===rebateBBook) ||
      (bookA===rebateBBook && bookB===rebateABook));
 
-  // 下注侧 A 的确定：沿用“投注设置”的 A 平台（固定金额）
   let pickA, pickB, sideA, sideB;
   if (bookA===aBook){ pickA=opp.pickA; pickB=opp.pickB; sideA='A'; sideB='B'; }
   else if (bookB===aBook){ pickA=opp.pickB; pickB=opp.pickA; sideA='B'; sideB='A'; }
@@ -499,24 +397,20 @@ function calculateArbitrage(opp){
     waterA:(oA-1).toFixed(3), waterB:(oB-1).toFixed(3),
     stakeB:Math.round(sB), profit:Math.round(profit),
     shouldAlert:(isABPair && profit>=minProfit),
-    signature: generateSignature(opp, pickA, pickB, profit) // 包含赔率/盈利，配合软去重
+    signature: generateSignature(opp, pickA, pickB, profit)
   };
 }
 function generateSignature(opp, pickA, pickB, profit){
-  // 为了“新变化就可再次提醒”，把赔率和盈利纳入签名的可变部分
   const a = `${normBookKey(pickA?.book||'')}_${pickA?.selection||''}_${Math.round((+pickA?.odds||0)*1000)}`;
   const b = `${normBookKey(pickB?.book||'')}_${pickB?.selection||''}_${Math.round((+pickB?.odds||0)*1000)}`;
   const base = `${getEventKey(opp)}_${opp.market}_${opp.line_text||opp.line_numeric||''}`;
   return `${base}__${[a,b].sort().join('__')}__p${profit}`;
 }
-
-/* ------- 显示上的 A/B 归位（优先返水 A/B；兜底用“投注设置”的 A 平台） ------- */
 function picksForABDisplay(opp){
   const aRebate = normBookKey(settings.rebateA?.book||'');
   const bRebate = normBookKey(settings.rebateB?.book||'');
   const aStake  = normBookKey(settings.stake?.aBook||'');
 
-  // 优先使用返水 A/B 的明确映射
   if (aRebate || bRebate){
     let pickForA=null, pickForB=null;
     if (aRebate){
@@ -528,7 +422,6 @@ function picksForABDisplay(opp){
       else if (normBookKey(opp.pickB.book)===bRebate) pickForB=opp.pickB;
     }
     if (!pickForA || !pickForB){
-      // 万一只配了其中一个，另一个用对手作兜底
       const other = (pickForA && pickForA===opp.pickA) ? opp.pickB
                    : (pickForA && pickForA===opp.pickB) ? opp.pickA
                    : (pickForB && pickForB===opp.pickA) ? opp.pickB
@@ -538,40 +431,31 @@ function picksForABDisplay(opp){
     }
     return { pickForA, pickForB };
   }
-
-  // 兜底：未配置返水 A/B 时，用“投注设置”的 A 平台标记 A，其余为 B
   if (aStake){
     const pickForA = normBookKey(opp.pickA.book)===aStake ? opp.pickA
                     : normBookKey(opp.pickB.book)===aStake ? opp.pickB : opp.pickA;
     const pickForB = (pickForA===opp.pickA) ? opp.pickB : opp.pickA;
     return { pickForA, pickForB };
   }
-
-  // 再兜底：按原始顺序
   return { pickForA:opp.pickA, pickForB:opp.pickB };
 }
 
-/* ------------------ 套利表格 ------------------ */
+/* ------------------ 套利表格（保持不变） ------------------ */
 function addArbitrageOpportunity(result, shouldAlert){
-  // 仅 A/B 对碰的机会才进入表格与弹窗逻辑
   if (!isABPairOpp(result.opportunity)) return;
 
   const tbody=document.querySelector('#arbitrageTable tbody');
   const sig=result.signature, minProfit=parseInt(settings.stake?.minProfit)||0;
   if (result.profit<minProfit) return;
 
-  // 若已存在同签名行：删除旧行，重新插入到最上面（确保“最新置顶”）
   const existed=tbody.querySelector(`tr[data-signature="${CSS.escape(sig)}"]`);
   if (existed) existed.remove();
 
-  // 移除“暂无数据”
   const noData=tbody.querySelector('.no-data'); if (noData) noData.remove();
 
   const row=createArbitrageRow(result);
-  // 最新插最上
   tbody.insertBefore(row, tbody.firstChild);
 
-  // 无条件设置自动隐藏（即使不弹窗也会隐藏）
   const hideS = parseInt(settings.notify?.autoHideRowS) || 0;
   if (hideS > 0) {
     setTimeout(() => {
@@ -579,7 +463,6 @@ function addArbitrageOpportunity(result, shouldAlert){
     }, hideS * 1000);
   }
 
-  // 软去重：在允许范围内弹窗 + 声音
   if (shouldAlert) sendAlert(result);
 }
 function ensureNoDataRow(){
@@ -667,7 +550,6 @@ function ensureToastStack(){
     stack.id = 'toast-stack';
     document.body.appendChild(stack);
   }
-  // 关键样式兜底（避免滚动时隐藏）
   const s = stack.style;
   s.position = 'fixed'; s.top = '16px'; s.right = '16px';
   s.zIndex = '2147483647'; s.display = 'flex'; s.flexDirection = 'column'; s.gap = '10px'; s.pointerEvents='none';
@@ -682,13 +564,11 @@ function showToast(title, message, type='info'){
     <div class="toast-title">${title}</div>
     <div class="toast-message">${message}</div>
   `;
-  // 最新置顶
   stack.prepend(el);
   const duration = (settings.notify?.toastDurationS||5)*1000;
   setTimeout(()=> { el.classList.add('removing'); setTimeout(()=> el.remove(), 200); }, duration);
 }
 function sendAlert(result){
-  // 仅 A/B 对碰才弹
   if (!isABPairOpp(result.opportunity)) return;
 
   const sig=result.signature;
@@ -716,12 +596,10 @@ function sendAlert(result){
 
     if (settings.notify?.toastEnabled) showToast(title,msg,'success');
 
-    // 系统通知
     if (settings.notify?.systemEnabled && 'Notification' in window && Notification.permission==='granted') {
       new Notification(title, { body:`${marketText}${lineText}  盈利 ${result.profit.toLocaleString()}`, icon:'/favicon.ico' });
     }
 
-    // 声音：若未解锁音频，排队并提示一次
     if (settings.notify?.soundEnabled) {
       if (hasUserInteracted) {
         playNotificationSound();
@@ -749,7 +627,7 @@ function playNotificationSound(){
   }catch(_){}
 }
 
-/* ------------------ 行情总览（不改） ------------------ */
+/* ------------------ 行情总览（不变） ------------------ */
 function renderMarketBoard(){
   const tbody=document.querySelector('#marketTable tbody'); if (!tbody) return;
   tbody.innerHTML='';
@@ -796,7 +674,7 @@ function initUI(loaded){
   ensureAlertStyles(); ensureToastStack();
   requestNotificationPermission();
 
-  // 多事件尽早解锁音频，并补放排队提示音
+  // 解锁音频
   const enableSoundOnce = () => {
     hasUserInteracted = true;
     const n = pendingBeeps; pendingBeeps = 0;
@@ -866,8 +744,8 @@ function initSettingsPanels(){
   if (autoHideRow)  autoHideRow .addEventListener('input', ()=>{ settings.notify=settings.notify||{}; settings.notify.autoHideRowS=parseInt(autoHideRow.value)||0; saveSettings(); });
 
   if (clearAlerts) clearAlerts.addEventListener('click', ()=>{
-    alertMemory.clear();                     // 清软去重缓存
-    const stack = ensureToastStack(); stack.innerHTML=''; // 清 Toast
+    alertMemory.clear();
+    const stack = document.getElementById('toast-stack'); if (stack) stack.innerHTML='';
     const tbody=document.querySelector('#arbitrageTable tbody');
     if (tbody) {
       tbody.querySelectorAll('tr').forEach(tr=>{ if(!tr.classList.contains('no-data')) tr.remove(); });
@@ -877,7 +755,7 @@ function initSettingsPanels(){
   });
 }
 
-/* 书商 UI 渲染 */
+/* 书商 UI 渲染（不变） */
 function renderBookList(){
   const container=document.getElementById('book-list'); if (!container) return;
   container.innerHTML='';
@@ -898,7 +776,7 @@ function renderBookList(){
   });
 }
 
-/* A/B 返水设置（即时保存） */
+/* A/B 返水设置（不变） */
 function renderRebateSettings(){
   const container=document.querySelector('#panel-rebates .panel-content'); if (!container) return;
   container.innerHTML='';
@@ -930,7 +808,6 @@ function renderRebateSettings(){
   fillOptions(selA, settings.rebateA?.book||''); fillOptions(selB, settings.rebateB?.book||'');
   inpA.value=settings.rebateA?.rate ?? ''; inpB.value=settings.rebateB?.rate ?? '';
 
-  // 即改即存
   selA.addEventListener('change', ()=>{ settings.rebateA={ book:selA.value||'', rate:parseFloat(inpA.value)||0 }; saveSettings(); recalculateAllArbitrageOpportunities(); });
   selB.addEventListener('change', ()=>{ settings.rebateB={ book:selB.value||'', rate:parseFloat(inpB.value)||0 }; saveSettings(); recalculateAllArbitrageOpportunities(); });
   inpA.addEventListener('input', ()=>{ settings.rebateA={ book:selA.value||'', rate:parseFloat(inpA.value)||0 }; saveSettings(); recalculateAllArbitrageOpportunities(); });
@@ -945,44 +822,30 @@ function updateABookOptions(){
   if (enabled.includes(prev)) sel.value=prev; else { sel.value=enabled[0]; settings.stake.aBook=enabled[0]; saveSettings(); }
 }
 
-/* 数据源面板 */
+/* 数据源面板（强制隐藏“模拟数据”） */
 function initDatasourcePanel(){
   const wsModeAuto=document.getElementById('ws-mode-auto');
   const wsModeCustom=document.getElementById('ws-mode-custom');
   const wsUrlInput=document.getElementById('ws-url');
   const wsTokenInput=document.getElementById('ws-token');
-  const useMockChk=document.getElementById('use-mock');
+  const useMockChk=document.getElementById('use-mock');       // 如果存在，强制关闭并隐藏
   const testBtn=document.getElementById('test-connection');
   const reconnectBtn=document.getElementById('reconnect-now');
 
   const ds=settings.datasource||{};
+  ds.useMock = false; // 保守：强制关闭
+  if (useMockChk){ useMockChk.checked=false; const parent=useMockChk.closest('.toggle-item'); if (parent) parent.style.display='none'; }
+
   if (ds.wsMode==='custom'){ wsModeCustom && (wsModeCustom.checked=true); wsUrlInput && (wsUrlInput.disabled=false); }
   else { wsModeAuto && (wsModeAuto.checked=true); wsUrlInput && (wsUrlInput.disabled=true); }
   wsUrlInput && (wsUrlInput.value=ds.wsUrl||''); wsTokenInput && (wsTokenInput.value=ds.token||'');
-  if (useMockChk) useMockChk.checked = !!ds.useMock;
-
-  const syncMock=()=>{
-    settings.datasource.useMock = !!useMockChk.checked; saveSettings();
-    if (settings.datasource.useMock) enterMockMode();
-    else {
-      stopMockData(); marketBoard.clear(); clearArbitrageTable(); clearDiscoveredBooks(); renderMarketBoard(); alertMemory.clear();
-      const stack=document.getElementById('toast-stack'); if (stack) stack.innerHTML=''; reconnectNow();
-    }
-  };
 
   wsModeAuto && wsModeAuto.addEventListener('change', ()=>{ if (wsModeAuto.checked){ settings.datasource.wsMode='auto'; wsUrlInput && (wsUrlInput.disabled=true); saveSettings(); showReconnectButton(); }});
   wsModeCustom && wsModeCustom.addEventListener('change', ()=>{ if (wsModeCustom.checked){ settings.datasource.wsMode='custom'; wsUrlInput && (wsUrlInput.disabled=false); saveSettings(); showReconnectButton(); }});
   wsUrlInput && wsUrlInput.addEventListener('input', ()=>{ settings.datasource.wsUrl=wsUrlInput.value; saveSettings(); showReconnectButton(); });
   wsTokenInput && wsTokenInput.addEventListener('input', ()=>{ settings.datasource.token=wsTokenInput.value; saveSettings(); showReconnectButton(); });
 
-  if (useMockChk){
-    useMockChk.addEventListener('change', syncMock);
-    const parent=useMockChk.closest('.toggle-item');
-    parent && parent.addEventListener('click', (e)=>{ if (e.target!==useMockChk){ e.preventDefault(); useMockChk.checked=!useMockChk.checked; syncMock(); }});
-  }
-
   if (testBtn) testBtn.addEventListener('click', ()=>{
-    if (settings.datasource?.useMock){ showToast('连接测试','当前为模拟模式，无需连接服务器','success'); return; }
     testBtn.disabled=true; testBtn.textContent='测试中...';
     let url;
     if (settings.datasource?.wsMode==='custom' && (settings.datasource?.wsUrl||'').trim()){ url=settings.datasource.wsUrl.trim(); }
@@ -993,12 +856,6 @@ function initDatasourcePanel(){
     t.onerror=()=>{ clearTimeout(timeout); testBtn.disabled=false; testBtn.textContent='测试连接'; showToast('连接测试','连接失败','error'); };
   });
   reconnectBtn && reconnectBtn.addEventListener('click', ()=>{ reconnectNow(); hideReconnectButton(); });
-
-  // 开关初始为开时，立即进入模拟模式
-  if (useMockChk && useMockChk.checked) {
-    if (!settings.datasource.useMock) { settings.datasource.useMock = true; saveSettings(); }
-    queueMicrotask(()=> enterMockMode());
-  }
 }
 function showReconnectButton(){ const b=document.getElementById('reconnect-now'); if (b) b.style.display='block'; }
 function hideReconnectButton(){ const b=document.getElementById('reconnect-now'); if (b) b.style.display='none'; }
@@ -1038,7 +895,6 @@ function initMarketControls(){
 function requestNotificationPermission(){ if ('Notification' in window && Notification.permission==='default') Notification.requestPermission(); }
 function updateConnectionStatus(status){
   const badge=document.getElementById('statusBadge'); const alert=document.getElementById('connectionError'); if (!badge || !alert) return;
-  if (settings.datasource?.useMock){ badge.className='status-badge connected'; badge.textContent='已连接（模拟）'; alert.style.display='none'; return; }
   badge.className = `status-badge ${status}`;
   if (status==='connected'){ badge.textContent='已连接'; alert.style.display='none'; }
   else if (status==='connecting'){ badge.textContent='连接中...'; alert.style.display='none'; }
@@ -1050,5 +906,5 @@ function updateLastUpdateTime(){ const el=document.getElementById('lastUpdateTim
 document.addEventListener('DOMContentLoaded', ()=>{
   const loaded=loadSettings();
   initUI(loaded);
-  connectWS(); // 若已勾选“使用模拟数据”，会直接进入模拟数据模式
+  connectWS();
 });
