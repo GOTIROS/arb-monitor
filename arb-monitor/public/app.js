@@ -1054,3 +1054,17 @@ window.__ARB_DEBUG__ = {
   board: marketBoard,
   books: discoveredBooks
 };
+
+/* ------------------ HOTFIX: 赔率显示(长小数/港盘) ------------------ */
+/* 仅影响“显示”，不改内存中的真实赔率，不动任何业务逻辑 */
+(function(){
+  window.fmtOdd = function(o){
+    const n = Number(o);
+    if (!Number.isFinite(n)) return '-';
+    // ≤1 视为港盘，显示时转欧赔 +1；再做两位小数四舍五入
+    const dec = n <= 1 ? n + 1 : n;
+    const rounded = Math.round(dec * 100) / 100; // 消除 1.83999999999 这类尾差
+    return rounded.toFixed(2);
+  };
+})();
+JSFIX
