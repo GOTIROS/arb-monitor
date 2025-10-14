@@ -27,6 +27,37 @@ let sortMode = 'time'; // 'time' | 'league'
 const rowOrder = new Map(); // key: eventKey|book -> stable index
 let rowSeq = 0;
 
+/* >>>>>>>>>>>>>>>>>>>>>  新增：本地模拟  <<<<<<<<<<<<<<<<<<<<<< */
+let mockTimers = [];
+function stopMock(){ try{ mockTimers.forEach(clearInterval);}catch(_){ } mockTimers=[]; }
+function connectMock(){
+  updateConnectionStatus('connected');
+  lastHeartbeat = Date.now();
+  // 心跳
+  mockTimers.push(setInterval(()=>{ handleWebSocketMessage({type:'heartbeat', ts:Date.now()}); }, 3000));
+  // 每 5s 推一份 snapshot（含 OU + AH）
+  mockTimers.push(setInterval(()=>{
+    const base = {
+      league:'测试联赛',
+      event_name:'Mock United vs Demo City',
+      score:'0:0',
+      kickoffAt: Date.now() + 60*60*1000
+    };
+    const ou = {
+      ...base, market:'ou', line_text:'2.5',
+      pickA:{ book:'pinnacle', selection:'over',  odds:1.93 },
+      pickB:{ book:'188bet',   selection:'under', odds:1.93 }
+    };
+    const ah = {
+      ...base, market:'ah', line_text:'-0.5',
+      pickA:{ book:'pinnacle', selection:'home', odds:1.90 },
+      pickB:{ book:'188bet',   selection:'away', odds:1.95 }
+    };
+    handleWebSocketMessage({ type:'snapshot', data:[ou,ah], ts:Date.now() });
+  }, 5000));
+}
+/* >>>>>>>>>>>>>>>>>>>>>  本地模拟结束  <<<<<<<<<<<<<<<<<<<<<< */
+
 /* ------------------ 常用函数 ------------------ */
 function rowKey(eventKey, book) { return `${eventKey}|${(book||'').toLowerCase()}`; }
 function guessKickoffTs(obj) {
@@ -59,7 +90,7 @@ function zhSel(sel){
 
 /* ------------------ 默认设置 ------------------ */
 const DEFAULT_SETTINGS = {
-  datasource: { wsMode:'auto', wsUrl:'', token:'' },
+  datasource: { wsMode:'auto', wsUrl:'', token:'', mockEnabled:false }, // <<< 新增 mockEnabled
   books: {},
   rebates: {},                   // 旧字段保留
   rebateA: { book:'', rate:0 },  // A 平台（书商+返水）
@@ -111,6 +142,14 @@ function getEventKey(opp){ return `${opp.league || ''}|${opp.event_name || ''}`;
 
 /* ------------------ WebSocket ------------------ */
 function connectWS() {
+  // <<< 新增：若开启了模拟，走本地模拟，不连真实 WS
+  if (settings.datasource?.mockEnabled) {
+    stopMock();
+    connectMock();
+    return;
+  }
+  stopMock(); // 确保切回真实时停止 mock
+
   if (ws && (ws.readyState===WebSocket.CONNECTING || ws.readyState===WebSocket.OPEN)) return;
   if (settings.datasource?.wsMode==='custom' && !(settings.datasource?.wsUrl||'').trim()) {
     updateConnectionStatus('connecting'); return;
@@ -153,7 +192,13 @@ function connectWS() {
     updateConnectionStatus('reconnecting'); scheduleReconnect();
   }
 }
-function reconnectNow(){ if (ws) ws.close(); if (wsReconnectTimer){ clearTimeout(wsReconnectTimer); wsReconnectTimer=null; } wsReconnectAttempts=0; setTimeout(connectWS, 120); }
+function reconnectNow(){ 
+  stopMock(); // <<< 新增：手动重连前停掉 mock
+  if (ws) ws.close(); 
+  if (wsReconnectTimer){ clearTimeout(wsReconnectTimer); wsReconnectTimer=null; } 
+  wsReconnectAttempts=0; 
+  setTimeout(connectWS, 120); 
+}
 function scheduleReconnect(){ if (wsReconnectTimer) clearTimeout(wsReconnectTimer); wsReconnectAttempts++; const d=Math.min(30000, Math.pow(2, wsReconnectAttempts-1)*1000); wsReconnectTimer=setTimeout(connectWS, d); }
 function startHeartbeatMonitor(){ stopHeartbeatMonitor(); heartbeatTimer=setInterval(()=>{ if (lastHeartbeat && (Date.now()-lastHeartbeat>30000)) { try{ ws && ws.close(); }catch(_){}} }, 5000); }
 function stopHeartbeatMonitor(){ if (heartbeatTimer){ clearInterval(heartbeatTimer); heartbeatTimer=null; } }
@@ -856,6 +901,18 @@ function initDatasourcePanel(){
   if (ds.wsMode==='custom'){ wsModeCustom && (wsModeCustom.checked=true); wsUrlInput && (wsUrlInput.disabled=false); }
   else { wsModeAuto && (wsModeAuto.checked=true); wsUrlInput && (wsUrlInput.disabled=true); }
   wsUrlInput && (wsUrlInput.value=ds.wsUrl||''); wsTokenInput && (wsTokenInput.value=ds.token||'');
+
+  // >>> 新增：使用模拟数据开关（任一选择器能命中即可）
+  const mockSwitch = document.querySelector('#use-mock, input[name="use-mock"], [data-mock]');
+  if (mockSwitch){
+    mockSwitch.disabled = false;
+    mockSwitch.checked = !!(settings.datasource?.mockEnabled);
+    mockSwitch.addEventListener('change', ()=>{
+      settings.datasource.mockEnabled = !!mockSwitch.checked;
+      saveSettings();
+      showReconnectButton(); // 切换后提示重连
+    });
+  }
 
   wsModeAuto && wsModeAuto.addEventListener('change', ()=>{ if (wsModeAuto.checked){ settings.datasource.wsMode='auto'; wsUrlInput && (wsUrlInput.disabled=true); saveSettings(); showReconnectButton(); }});
   wsModeCustom && wsModeCustom.addEventListener('change', ()=>{ if (wsModeCustom.checked){ settings.datasource.wsMode='custom'; wsUrlInput && (wsUrlInput.disabled=false); saveSettings(); showReconnectButton(); }});
