@@ -978,7 +978,79 @@ function updateLastUpdateTime(){ const el=document.getElementById('lastUpdateTim
 
 /* ------------------ 启动入口 ------------------ */
 document.addEventListener('DOMContentLoaded', ()=>{
-  const loaded=loadSettings();
+  const loaded = loadSettings();
   initUI(loaded);
   connectWS();
 });
+
+/* 最近更新时间（被消息处理调用） */
+function updateLastUpdateTime(){
+  const el = document.getElementById('lastUpdateTime');
+  if (el) el.textContent = formatTime(new Date());
+}
+
+/* 初始化 UI（基于你现有结构，不改版、不删组件） */
+function initUI(loaded){
+  try{
+    settings = loaded || DEFAULT_SETTINGS;
+
+    // 侧边栏/抽屉
+    initHamburgerMenu();
+
+    // 面板开关状态
+    loadPanelStates();
+
+    // 数据源设置（含“使用模拟数据”开关，已适配多种选择器）
+    initDatasourcePanel();
+
+    // 书商 & 返水
+    renderBookList();
+    renderRebateSettings();
+
+    // 投注与提醒设置
+    updateStakeInputs();
+    updateNotifyInputs();
+
+    // 行情面板交互（时间/联赛排序、折叠）
+    initMarketControls();
+
+    // 表格兜底占位
+    ensureNoDataRow();
+
+    // 声音权限提示（系统通知可选）
+    requestNotificationPermission();
+
+    // 首次状态
+    updateConnectionStatus('connecting');
+
+    // 第一次进入时，激活一次点击以允许声音播放
+    const onceClick = () => {
+      hasUserInteracted = true;
+      // 如果之前有待播放的提示音，这里补一次
+      if (pendingBeeps > 0){
+        const n = Math.min(pendingBeeps, 2);
+        pendingBeeps = 0;
+        for (let i=0;i<n;i++) playNotificationSound();
+      }
+    };
+    document.addEventListener('click', onceClick, { once:true, capture:true });
+
+    // 窗口重新获得焦点时，若断线则立即重连
+    window.addEventListener('focus', () => {
+      try { if (!ws || ws.readyState !== WebSocket.OPEN) reconnectNow(); } catch(_){}
+    });
+  }catch(e){
+    console.error('initUI 发生错误：', e);
+    // 出错时至少把连接状态展示出来，便于排查
+    try { updateConnectionStatus('reconnecting'); }catch(_){}
+  }
+}
+
+/* 便于排查用的全局调试对象（不影响页面） */
+window.__ARB_DEBUG__ = {
+  reconnectNow,
+  recalc: recalculateAllArbitrageOpportunities,
+  stats: __norm,
+  board: marketBoard,
+  books: discoveredBooks
+};
