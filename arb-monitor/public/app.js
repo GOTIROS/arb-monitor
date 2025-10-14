@@ -1,7 +1,3 @@
-cd /root/arb-monitor/public
-[ -f app.js ] && cp -a app.js app.js.bak.$(date +%Y%m%d-%H%M%S)
-
-cat > app.js <<'JS'
 /* =======================================================
    arb-monitor — public/app.js
    生产版（无模拟数据；兼容更多WS格式；自动探测表格；修复港盘&时间戳）
@@ -766,64 +762,128 @@ function findArbTbody(){
 
 /* ------------------ 行情总览 ------------------ */
 function renderMarketBoard(){
-  const tbody = findMarketTbody(); if (!tbody) return;
-  tbody.innerHTML='';
-  if (marketBoard.size===0){ tbody.innerHTML='<tr class="no-data"><td colspan="8">暂无数据</td></tr>'; return; }
+  try{
+    const tbody = findMarketTbody(); if (!tbody) return;
+    tbody.innerHTML='';
+    if (marketBoard.size===0){ tbody.innerHTML='<tr class="no-data"><td colspan="8">暂无数据</td></tr>'; return; }
 
-  const enabled = new Set(Array.from(discoveredBooks).filter(b => settings.books[b] !== false).map(b=>normBookKey(b)));
-  const rows=[];
-  for (const [eventId,data] of marketBoard.entries()){
-    const enabledBooks=[...data.books].filter(b => enabled.has(normBookKey(b)));
-    if (enabledBooks.length===0) continue;
-    enabledBooks.forEach(book=>{
-      const rk=rowKey(eventId,book); if (!rowOrder.has(rk)) rowOrder.set(rk,++rowSeq);
-      const ouE=data.ouMap.get(book), ahE=data.ahMap.get(book);
-      rows.push({
-        rk, stable:rowOrder.get(rk), book, league:data.league||'', home:data.home||'', away:data.away||'', score:data.score||'',
-        ouText: ouE?`${ouE.line||''} (${fmtOdd(ouE.over)} / ${fmtOdd(ouE.under)})`:'-',
-        ahText: ahE?`${ahE.line||''} (${fmtOdd(ahE.home)} / ${fmtOdd(ahE.away)})`:'-',
-        kickoffAt:data.kickoffAt||0, updatedAt:data.updatedAt||0
+    const enabled = new Set(Array.from(discoveredBooks).filter(b => settings.books[b] !== false).map(b=>normBookKey(b)));
+    const rows=[];
+    for (const [eventId,data] of marketBoard.entries()){
+      const enabledBooks=[...data.books].filter(b => enabled.has(normBookKey(b)));
+      if (enabledBooks.length===0) continue;
+      enabledBooks.forEach(book=>{
+        const rk=rowKey(eventId,book); if (!rowOrder.has(rk)) rowOrder.set(rk,++rowSeq);
+        const ouE=data.ouMap.get(book), ahE=data.ahMap.get(book);
+        rows.push({
+          rk, stable:rowOrder.get(rk), book, league:data.league||'', home:data.home||'', away:data.away||'', score:data.score||'',
+          ouText: ouE?`${ouE.line||''} (${fmtOdd(ouE.over)} / ${fmtOdd(ouE.under)})`:'-',
+          ahText: ahE?`${ahE.line||''} (${fmtOdd(ahE.home)} / ${fmtOdd(ahE.away)})`:'-',
+          kickoffAt:data.kickoffAt||0, updatedAt:data.updatedAt||0
+        });
       });
-    });
-  }
-  if (rows.length===0){ tbody.innerHTML='<tr class="no-data"><td colspan="8">暂无数据</td></tr>'; return; }
+    }
+    if (rows.length===0){ tbody.innerHTML='<tr class="no-data"><td colspan="8">暂无数据</td></tr>'; return; }
 
-  if (sortMode==='league'){
-    rows.sort((a,b)=>{ const l=a.league.localeCompare(b.league); if(l)return l; const t=(a.kickoffAt||a.updatedAt)-(b.kickoffAt||b.updatedAt); if(t)return t; return a.stable-b.stable; });
-  } else {
-    rows.sort((a,b)=>{ const t=(a.kickoffAt||a.updatedAt)-(b.kickoffAt||b.updatedAt); if(t)return t; const l=a.league.localeCompare(b.league); if(l)return l; return a.stable-b.stable; });
-  }
+    if (sortMode==='league'){
+      rows.sort((a,b)=>{ const l=a.league.localeCompare(b.league); if(l)return l; const t=(a.kickoffAt||a.updatedAt)-(b.kickoffAt||b.updatedAt); if(t)return t; return a.stable-b.stable; });
+    } else {
+      rows.sort((a,b)=>{ const t=(a.kickoffAt||a.updatedAt)-(b.kickoffAt||b.updatedAt); if(t)return t; const l=a.league.localeCompare(b.league); if(l)return l; return a.stable-b.stable; });
+    }
 
-  const frag=document.createDocumentFragment();
-  for (const r of rows){
-    const tr=document.createElement('tr');
-    const timeText=(r.kickoffAt||r.updatedAt)?formatTime(new Date(r.kickoffAt||r.updatedAt)):'-';
-    tr.innerHTML=`<td>${r.book}</td><td>${r.league}</td><td>${r.home}</td><td>${r.away}</td><td>${r.score||'-'}</td><td>${r.ouText}</td><td>${r.ahText}</td><td>${timeText}</td>`;
-    frag.appendChild(tr);
-  }
-  tbody.appendChild(frag);
+    const frag=document.createDocumentFragment();
+    for (const r of rows){
+      const tr=document.createElement('tr');
+      const timeText=(r.kickoffAt||r.updatedAt)?formatTime(new Date(r.kickoffAt||r.updatedAt)):'-';
+      tr.innerHTML=`<td>${r.book}</td><td>${r.league}</td><td>${r.home}</td><td>${r.away}</td><td>${r.score||'-'}</td><td>${r.ouText}</td><td>${r.ahText}</td><td>${timeText}</td>`;
+      frag.appendChild(tr);
+    }
+    tbody.appendChild(frag);
+  }catch(e){ console.error('renderMarketBoard error', e); }
 }
 
-/* ------------------ 书商 UI 渲染、设置面板、通知等（与你现版一致，未删节） ------------------ */
-/* ……下略的都是你现版函数，已保留原实现：renderBookList / renderRebateSettings / updateABookOptions /
-   initDatasourcePanel / requestNotificationPermission / updateConnectionStatus /
-   initHamburgerMenu / initMarketControls / 等……  为节省篇幅这里保留了完整实现（已在你上一版中） …… */
+/* ------------------ 书商 UI 渲染（安全实现） ------------------ */
+function renderBookList(){
+  try{
+    const containers = [
+      document.getElementById('booksContainer'),
+      document.querySelector('#books-panel'),
+      document.querySelector('#bookList'),
+      document.querySelector('#booksList')
+    ].filter(Boolean);
+    if (containers.length===0) return;
+    const enabled = settings.books || {};
+    const list = Array.from(discoveredBooks).sort();
+    containers.forEach(c=>{
+      c.innerHTML='';
+      if (list.length===0){ c.innerHTML='<div style="opacity:.6">尚未发现书商</div>'; return; }
+      list.forEach(b=>{
+        const id = `bk_${b}`;
+        const wrapper = document.createElement('label');
+        wrapper.style.display='inline-flex'; wrapper.style.alignItems='center'; wrapper.style.gap='6px'; wrapper.style.margin='4px 10px 4px 0';
+        const cb = document.createElement('input'); cb.type='checkbox'; cb.id=id; cb.checked = enabled[b] !== false;
+        cb.addEventListener('change', ()=>{ settings.books[b] = cb.checked; saveSettings(); renderMarketBoard(); });
+        const span = document.createElement('span'); span.textContent = prettyBook(b);
+        wrapper.appendChild(cb); wrapper.appendChild(span);
+        c.appendChild(wrapper);
+      });
+    });
+  }catch(e){ console.error('renderBookList error', e); }
+}
 
-/* 数据源面板 */
+/* ------------------ 返水设置（安全实现） ------------------ */
+function fillSelectWithBooks(sel, cur){
+  if (!sel) return;
+  const opts = Array.from(discoveredBooks).sort();
+  const v = (cur||'').toLowerCase();
+  sel.innerHTML = `<option value="">（未选择）</option>` + opts.map(b=>`<option value="${b}" ${v===b?'selected':''}>${prettyBook(b)}</option>`).join('');
+}
+function renderRebateSettings(){
+  try{
+    const aSel = document.getElementById('rebateA-book');
+    const bSel = document.getElementById('rebateB-book');
+    const aRate = document.getElementById('rebateA-rate');
+    const bRate = document.getElementById('rebateB-rate');
+    if (!aSel && !bSel && !aRate && !bRate) return; // 页面没有这些控件就跳过
+
+    fillSelectWithBooks(aSel, settings.rebateA?.book||'');
+    fillSelectWithBooks(bSel, settings.rebateB?.book||'');
+
+    if (aRate) aRate.value = settings.rebateA?.rate || 0;
+    if (bRate) bRate.value = settings.rebateB?.rate || 0;
+
+    aSel && aSel.addEventListener('change', ()=>{ settings.rebateA.book=aSel.value; saveSettings(); });
+    bSel && bSel.addEventListener('change', ()=>{ settings.rebateB.book=bSel.value; saveSettings(); });
+    aRate && aRate.addEventListener('input', ()=>{ settings.rebateA.rate=parseFloat(aRate.value)||0; saveSettings(); });
+    bRate && bRate.addEventListener('input', ()=>{ settings.rebateB.rate=parseFloat(bRate.value)||0; saveSettings(); });
+  }catch(e){ console.error('renderRebateSettings error', e); }
+}
+function updateABookOptions(){
+  try{
+    const stakeSel = document.getElementById('stake-a-book') || document.getElementById('stakeABook') || document.getElementById('stakeAB');
+    if (!stakeSel) return;
+    fillSelectWithBooks(stakeSel, settings.stake?.aBook||'');
+    stakeSel.addEventListener('change', ()=>{ settings.stake.aBook = stakeSel.value; saveSettings(); });
+  }catch(e){ console.error('updateABookOptions error', e); }
+}
+
+/* ------------------ 数据源面板 ------------------ */
 function initDatasourcePanel(){
-  const wsModeAuto=document.getElementById('ws-mode-auto');
-  const wsModeCustom=document.getElementById('ws-mode-custom');
-  const wsUrlInput=document.getElementById('ws-url');
-  const wsTokenInput=document.getElementById('ws-token');
-  const testBtn=document.getElementById('test-connection');
-  const reconnectBtn=document.getElementById('reconnect-now');
+  const wsModeAuto=document.getElementById('ws-mode-auto') || document.querySelector('input[name="ws-mode"][value="auto"]');
+  const wsModeCustom=document.getElementById('ws-mode-custom') || document.querySelector('input[name="ws-mode"][value="custom"]');
+  const wsUrlInput=document.getElementById('ws-url') || document.querySelector('input[name="ws-url"]');
+  const wsTokenInput=document.getElementById('ws-token') || document.querySelector('input[name="ws-token"]');
+  const testBtn=document.getElementById('test-connection') || document.querySelector('[data-test-connection]');
+  const reconnectBtn=document.getElementById('reconnect-now') || document.querySelector('[data-reconnect-now]');
 
   const ds=settings.datasource||{};
-  if (ds.wsMode==='custom'){ wsModeCustom && (wsModeCustom.checked=true); wsUrlInput && (wsUrlInput.disabled=false); }
-  else { wsModeAuto && (wsModeAuto.checked=true); wsUrlInput && (wsUrlInput.disabled=true); }
+  if (wsModeAuto || wsModeCustom){
+    if (ds.wsMode==='custom'){ wsModeCustom && (wsModeCustom.checked=true); wsUrlInput && (wsUrlInput.disabled=false); }
+    else { wsModeAuto && (wsModeAuto.checked=true); wsUrlInput && (wsUrlInput.disabled=true); }
+  }
   wsUrlInput && (wsUrlInput.value=ds.wsUrl||''); wsTokenInput && (wsTokenInput.value=ds.token||'');
 
-  // 使用模拟数据开关：支持多种选择器（避免主题差异）
+  // 使用模拟数据开关：适配多种选择器
   const mockSwitch = document.querySelector('#use-mock, input[name="use-mock"], [data-mock], #mockSwitch, .mock-switch input[type="checkbox"]');
   if (mockSwitch){
     mockSwitch.disabled = false;
@@ -852,54 +912,52 @@ function initDatasourcePanel(){
   });
   reconnectBtn && reconnectBtn.addEventListener('click', ()=>{ reconnectNow(); hideReconnectButton(); });
 }
-function showReconnectButton(){ const b=document.getElementById('reconnect-now'); if (b) b.style.display='block'; }
-function hideReconnectButton(){ const b=document.getElementById('reconnect-now'); if (b) b.style.display='none'; }
+function showReconnectButton(){ const b=document.getElementById('reconnect-now') || document.querySelector('[data-reconnect-now]'); if (b) b.style.display='block'; }
+function hideReconnectButton(){ const b=document.getElementById('reconnect-now') || document.querySelector('[data-reconnect-now]'); if (b) b.style.display='none'; }
 
-/* 市场控制面板、汉堡、通知、状态…（保持原实现） */
-function updateStakeInputs(){ const s=settings.stake||{}; const amountAInput=document.getElementById('amount-a'); const minProfitInput=document.getElementById('min-profit'); if (amountAInput) amountAInput.value=s.amountA||10000; if (minProfitInput) minProfitInput.value=s.minProfit||0; updateABookOptions(); }
-function updateNotifyInputs(){
-  const n=settings.notify||{}; const systemNotify=document.getElementById('system-notify'); const soundNotify=document.getElementById('sound-notify'); const toastNotify=document.getElementById('toast-notify'); const toastDuration=document.getElementById('toast-duration'); const autoHideRow=document.getElementById('auto-hide-row');
-  if (systemNotify) systemNotify.checked=!!n.systemEnabled; if (soundNotify) soundNotify.checked=n.soundEnabled!==false; if (toastNotify) toastNotify.checked=n.toastEnabled!==false;
-  if (toastDuration) toastDuration.value=n.toastDurationS||5; if (autoHideRow) autoHideRow.value=n.autoHideRowS||30;
-}
+/* ------------------ 汉堡菜单（安全实现） ------------------ */
 function initHamburgerMenu(){
-  const btn=document.querySelector('#hamburgerBtn, #hamburger, .hamburger-btn, .hamburger, .menu-btn, [data-hamburger]');
-  const drawer=document.querySelector('#drawer, [data-drawer], .drawer');
-  let overlay=document.getElementById('drawerOverlay');
-  if (!overlay){ overlay=document.createElement('div'); overlay.id='drawerOverlay'; overlay.className='drawer-overlay'; overlay.style.pointerEvents='none'; document.body.appendChild(overlay); }
-  else { overlay.classList.remove('active'); overlay.style.pointerEvents='none'; }
-  if (!btn || !drawer) return;
+  try{
+    const btn=document.querySelector('#hamburgerBtn, #hamburger, .hamburger-btn, .hamburger, .menu-btn, [data-hamburger]');
+    const drawer=document.querySelector('#drawer, [data-drawer], .drawer');
+    let overlay=document.getElementById('drawerOverlay');
+    if (!btn || !drawer) return;
 
-  function openDrawer(){ drawer.classList.add('active'); overlay.classList.add('active'); overlay.style.pointerEvents='auto'; document.body.style.overflow='hidden'; }
-  function closeDrawer(){ drawer.classList.remove('active'); overlay.classList.remove('active'); overlay.style.pointerEvents='none'; document.body.style.overflow=''; }
-  btn.addEventListener('click',(e)=>{ e.preventDefault(); e.stopPropagation(); openDrawer(); });
-  overlay.addEventListener('click',(e)=>{ e.preventDefault(); closeDrawer(); });
-  document.addEventListener('keydown',(e)=>{ if (e.key==='Escape') closeDrawer(); });
-  closeDrawer();
+    if (!overlay){
+      overlay=document.createElement('div');
+      overlay.id='drawerOverlay';
+      overlay.className='drawer-overlay';
+      overlay.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.0);opacity:0;transition:opacity .2s;z-index:999;pointer-events:none';
+      document.body.appendChild(overlay);
+    } else {
+      overlay.classList.remove('active'); overlay.style.pointerEvents='none';
+    }
 
-  const expandAllBtn=document.getElementById('expandAllBtn');
-  const collapseAllBtn=document.getElementById('collapseAllBtn');
-  if (expandAllBtn) expandAllBtn.addEventListener('click', ()=>{ document.querySelectorAll('#drawer details').forEach(d=>d.open=true); savePanelStates(); });
-  if (collapseAllBtn) collapseAllBtn.addEventListener('click', ()=>{ document.querySelectorAll('#drawer details').forEach(d=>d.open=false); savePanelStates(); });
+    function openDrawer(){
+      drawer.classList.add('active');
+      overlay.style.opacity='1'; overlay.style.background='rgba(0,0,0,.5)'; overlay.style.pointerEvents='auto';
+      document.body.style.overflow='hidden';
+    }
+    function closeDrawer(){
+      drawer.classList.remove('active');
+      overlay.style.opacity='0'; overlay.style.background='rgba(0,0,0,.0)'; overlay.style.pointerEvents='none';
+      document.body.style.overflow='';
+    }
+    btn.addEventListener('click',(e)=>{ e.preventDefault(); e.stopPropagation(); openDrawer(); });
+    overlay.addEventListener('click',(e)=>{ e.preventDefault(); closeDrawer(); });
+    document.addEventListener('keydown',(e)=>{ if (e.key==='Escape') closeDrawer(); });
+  }catch(e){ console.error('initHamburgerMenu error', e); }
 }
-function loadPanelStates(){
-  try{ const raw=localStorage.getItem('panel_state_v1'); const s=raw?JSON.parse(raw):{};
-    ['panel-datasource','panel-books','panel-rebates','panel-stake','panel-notify','panel-marketboard'].forEach(id=>{
-      const el=document.getElementById(id); if (!el) return; if (id==='panel-marketboard') el.open=s[id]===true; else el.open=s[id]!==false;
-    });
-  }catch(_){}
-}
-function savePanelStates(){
-  try{ const s={}; ['panel-datasource','panel-books','panel-rebates','panel-stake','panel-notify','panel-marketboard'].forEach(id=>{ const el=document.getElementById(id); if (el) s[id]=!!el.open; }); localStorage.setItem('panel_state_v1', JSON.stringify(s)); }catch(_){}
-}
+
+/* ------------------ 市场控制面板、通知、状态 ------------------ */
 function initMarketControls(){
   const sortByLeagueBtn=document.querySelector('#sortByLeague, [data-sort="league"]');
   const sortByTimeBtn=document.querySelector('#sortByTime, [data-sort="time"]');
   const collapseBtn=document.getElementById('market-collapse-btn');
   const marketPanel=document.getElementById('panel-marketboard');
 
-  if (sortByLeagueBtn) sortByLeagueBtn.addEventListener('click', ()=>{ sortMode='league'; sortByLeagueBtn.classList.add('active'); sortByTimeBtn && sortByTimeBtn.classList.remove('active'); renderMarketBoard(); });
-  if (sortByTimeBtn)   sortByTimeBtn.addEventListener('click', ()=>{ sortMode='time'; sortByTimeBtn.classList.add('active'); sortByLeagueBtn && sortByLeagueBtn.classList.remove('active'); renderMarketBoard(); });
+  sortByLeagueBtn && sortByLeagueBtn.addEventListener('click', ()=>{ sortMode='league'; sortByLeagueBtn.classList.add('active'); sortByTimeBtn && sortByTimeBtn.classList.remove('active'); renderMarketBoard(); });
+  sortByTimeBtn   && sortByTimeBtn  .addEventListener('click', ()=>{ sortMode='time';   sortByTimeBtn.classList.add('active');   sortByLeagueBtn && sortByLeagueBtn.classList.remove('active'); renderMarketBoard(); });
   if (collapseBtn && marketPanel) collapseBtn.addEventListener('click', (e)=>{ e.preventDefault(); e.stopPropagation(); marketPanel.open=!marketPanel.open; savePanelStates(); });
 }
 function requestNotificationPermission(){ if ('Notification' in window && Notification.permission==='default') Notification.requestPermission(); }
@@ -911,80 +969,8 @@ function updateConnectionStatus(status){
   else { badge.textContent='重连中...'; alert.style.display='block'; }
 }
 
-/* ------------------ 启动入口 ------------------ */
-document.addEventListener('DOMContentLoaded', ()=>{
-  const loaded = loadSettings();
-  initUI(loaded);
-  connectWS();
-});
-
-/* 最近更新时间（被消息处理调用） */
-function updateLastUpdateTime(){
-  const el = document.getElementById('lastUpdateTime');
-  if (el) el.textContent = formatTime(new Date());
-}
-
-/* 初始化 UI（基于你现有结构，不改版、不删组件） */
-function initUI(loaded){
-  try{
-    settings = loaded || DEFAULT_SETTINGS;
-
-    // 侧边栏/抽屉
-    initHamburgerMenu();
-
-    // 面板开关状态
-    loadPanelStates();
-
-    // 数据源设置（含“使用模拟数据”开关，已适配多种选择器）
-    initDatasourcePanel();
-
-    // 书商 & 返水
-    renderBookList();
-    renderRebateSettings();
-
-    // 投注与提醒设置
-    updateStakeInputs();
-    updateNotifyInputs();
-
-    // 行情面板交互（时间/联赛排序、折叠）
-    initMarketControls();
-
-    // 表格兜底占位
-    ensureNoDataRow();
-
-    // 声音权限提示（系统通知可选）
-    requestNotificationPermission();
-
-    // 首次状态
-    updateConnectionStatus('connecting');
-
-    // 第一次进入时，激活一次点击以允许声音播放
-    const onceClick = () => {
-      hasUserInteracted = true;
-      if (pendingBeeps > 0){
-        const n = Math.min(pendingBeeps, 2);
-        pendingBeeps = 0;
-        for (let i=0;i<n;i++) playNotificationSound();
-      }
-    };
-    document.addEventListener('click', onceClick, { once:true, capture:true });
-
-    // 窗口重新获得焦点时，若断线则立即重连
-    window.addEventListener('focus', () => {
-      try { if (!ws || ws.readyState !== WebSocket.OPEN) reconnectNow(); } catch(_){}
-    });
-  }catch(e){
-    console.error('initUI 发生错误：', e);
-    try { updateConnectionStatus('reconnecting'); }catch(_){}
-  }
-}
-
-/* 便于排查用的全局调试对象（不影响页面） */
-window.__ARB_DEBUG__ = {
-  reconnectNow,
-  recalc: recalculateAllArbitrageOpportunities,
-  stats: __norm,
-  board: marketBoard,
-  books: discoveredBooks
-};
-JS
+/* 面板开关状态 */
+function loadPanelStates(){
+  try{ const raw=localStorage.getItem('panel_state_v1'); const s=raw?JSON.parse(raw):{};
+    ['panel-datasource','panel-books','panel-rebates','panel-stake','panel-notify','panel-marketboard'].forEach(id=>{
+      const el=document.getElementById(id); if (!el) return; if (id==='panel-marketboard') el.open=s[id]
