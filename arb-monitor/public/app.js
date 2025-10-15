@@ -84,21 +84,19 @@ function formatTime(date=new Date()) {
 function prettyBook(b){ b = (b||'').toString(); return b.charAt(0).toUpperCase()+b.slice(1); }
 function zhMarket(m){ return m==='ah' ? '让球' : '大小球'; }
 function zhSel(sel){
- 
-   // 只用于显示：把赔率四舍五入为 2 位小数（null/undefined/NaN 显示为 '-')
-function fmtOdd(o, digits = 2) {
-  const n = Number(o);
-  if (!Number.isFinite(n)) return '-';
-  return n.toFixed(digits);
-}
- 
-   switch((sel||'').toString().toLowerCase()){
+  switch((sel||'').toString().toLowerCase()){
     case 'home': return '主';
     case 'away': return '客';
     case 'over': return '大';
     case 'under': return '小';
     default: return sel;
   }
+}
+// 只用于显示：把赔率四舍五入为 2 位小数（null/undefined/NaN 显示为 '-')
+function fmtOdd(o, digits = 2) {
+  const n = Number(o);
+  if (!Number.isFinite(n)) return '-';
+  return n.toFixed(digits);
 }
 
 /* ------------------ 默认设置 ------------------ */
@@ -1044,4 +1042,5 @@ window.__ARB_DEBUG__ = {
   board: marketBoard,
   books: discoveredBooks
 };
+
 
