@@ -1,4 +1,3 @@
-
 /* =======================================================
    arb-monitor — public/app.js
    完整版（直接替换）
@@ -131,8 +130,13 @@ function clearDiscoveredBooks() {
 }
 
 /* ------------------ 工具函数 ------------------ */
+// ✅ 优先用 event_id，避免同场不同格式“打架”
 function getEventKey(opp) {
-  // 使用 league + event_name 作为唯一键
+  const id = opp.event_id || opp.eventId || opp.match_id || '';
+  if (id) return String(id);
+  const home = opp.home || '';
+  const away = opp.away || '';
+  if (home || away) return `${opp.league||''}|${home} vs ${away}`;
   return `${opp.league || ''}|${opp.event_name || ''}`;
 }
 
@@ -267,17 +271,12 @@ function stopHeartbeatMonitor() {
 
 /* ------------------ 消息处理（新增兼容层） ------------------ */
 
-/** 小工具：安全数字 */
+/** 小工具：安全数字/字符串/取字段 */
 function _num(v) {
   const n = (typeof v === 'string') ? parseFloat(v) : Number(v);
   return Number.isFinite(n) ? n : undefined;
 }
-/** 小工具：提字符串 */
-function _str(v) {
-  if (v == null) return '';
-  return (typeof v === 'string') ? v : String(v);
-}
-/** 小工具：取对象第一个存在的字段 */
+function _str(v) { if (v == null) return ''; return (typeof v === 'string') ? v : String(v); }
 function _pick(obj, keys, fallback) {
   for (const k of keys) {
     if (obj && obj[k] != null && obj[k] !== '') return obj[k];
@@ -292,7 +291,6 @@ const _UNDER_ALIASES = new Set(['under','u','小','小球','underline','underbet
 const _HOME_ALIASES  = new Set(['home','h','主','主队','1']);
 const _AWAY_ALIASES  = new Set(['away','a','客','客队','2']);
 
-/** 规格化 selection -> 'over'/'under'/'home'/'away' */
 function _normSel(s) {
   const t = _str(s).trim().toLowerCase();
   if (_OVER_ALIASES.has(t))  return 'over';
@@ -302,32 +300,27 @@ function _normSel(s) {
   return t;
 }
 
-/** 规格化 market -> 'ou'/'ah' */
 function _normMarket(m, pickA, pickB) {
   let t = _str(m).trim().toLowerCase();
-
   if (_OU_ALIASES.has(t)) return 'ou';
   if (_AH_ALIASES.has(t)) return 'ah';
 
-  // 通过选择推断
   const sa = _normSel(pickA?.selection);
   const sb = _normSel(pickB?.selection);
   if ((sa === 'over' && sb === 'under') || (sa === 'under' && sb === 'over')) return 'ou';
   if ((sa === 'home' && sb === 'away') || (sa === 'away' && sb === 'home')) return 'ah';
 
-  // 看字段名
   const ms = _str(m).toLowerCase();
   if (ms.includes('handicap') || ms.includes('让')) return 'ah';
   if (ms.includes('total')    || ms.includes('大小')) return 'ou';
-
   return 'ou';
 }
 
-/** 规格化一条机会 Opp（把“后端各种形状”捏成前端识别的 Opp 结构） */
+/** 规格化一条机会 Opp */
 function _normalizeOpp(raw) {
   if (!raw || typeof raw !== 'object') return null;
 
-  // 事件/联赛
+  // 事件/联赛/主客队
   const league = _str(_pick(raw, ['league','leagueName','league_name','league_cn','联赛','联赛名'], ''));
   const home   = _str(_pick(raw, ['home','homeTeam','home_name','主队','team_a'], ''));
   const away   = _str(_pick(raw, ['away','awayTeam','away_name','客队','team_b'], ''));
@@ -337,7 +330,7 @@ function _normalizeOpp(raw) {
   const lineText = _str(_pick(raw, ['line_text','lineText','line','handicap','ah','ou','total','盘口','大小'], ''));
   const lineNum  = _num(_pick(raw, ['line_numeric','lineNum','lineValue','total_points','handicap_value'], undefined));
 
-  // 赔率来源
+  // 赔率
   const overOdds  = _num(_pick(raw, ['over_odds','o_odds','odds_over','overOdds'], undefined));
   const underOdds = _num(_pick(raw, ['under_odds','u_odds','odds_under','underOdds'], undefined));
   const homeOdds  = _num(_pick(raw, ['home_odds','h_odds','odds_home','odds1','homeOdds'], undefined));
@@ -348,20 +341,18 @@ function _normalizeOpp(raw) {
   // 选择/书商
   let selA = _normSel(_pick(raw, ['selA','selectionA','pickA_sel','pickA_selection','selection_a'], ''));
   let selB = _normSel(_pick(raw, ['selB','selectionB','pickB_sel','pickB_selection','selection_b'], ''));
-  let bookA = _str(_pick(raw, ['bookA','book_a','pickA_book','bookNameA','a_book','aBook','book1'], ''));
-  let bookB = _str(_pick(raw, ['bookB','book_b','pickB_book','bookNameB','b_book','bBook','book2'], ''));
+  let bookA = _str(_pick(raw, ['bookA','book_a','pickA_book','bookNameA','a_book','aBook','book1','book'], ''));
+  let bookB = _str(_pick(raw, ['bookB','book_b','pickB_book','bookNameB','b_book','bBook','book2','bookAlt'], ''));
   bookA = bookA.toLowerCase(); bookB = bookB.toLowerCase();
 
   // 组装 pick
   let pickA, pickB;
   if (overOdds && underOdds) {
-    // OU
     if (!selA) selA = 'over';
     if (!selB) selB = 'under';
     pickA = { book: bookA || 'bookA', selection: selA, odds: overOdds };
     pickB = { book: bookB || 'bookB', selection: selB, odds: underOdds };
   } else if (homeOdds && awayOdds) {
-    // AH
     if (!selA) selA = 'home';
     if (!selB) selB = 'away';
     pickA = { book: bookA || 'bookA', selection: selA, odds: homeOdds };
@@ -394,13 +385,13 @@ function _normalizeOpp(raw) {
     event_id: eventId,
     event_name: eventName,
     league,
+    home, away,
     score: _str(_pick(raw, ['score','sc','比分'], '')),
     market,                    // 'ou' or 'ah'
     line_text: lineText || (lineNum!=null ? String(lineNum) : ''),
     line_numeric: (lineNum!=null ? lineNum : undefined),
     pickA,
     pickB,
-    // 透传：kickoff 之类时间字段，用于你现有的 guessKickoffTs
     kickoffAt: _pick(raw, ['kickoffAt','kickoff_at','kickoff','matchTime','match_time','start_time','start_ts','startTime'], undefined)
   };
 }
@@ -420,21 +411,22 @@ function _normalizeMessage(message) {
   if (!type || type === 'ping' || type === 'hello') return { type: 'heartbeat', ts };
   if (type === 'heartbeat') return { type:'heartbeat', ts };
 
+  // ✅ 关键修复：识别 rows/payload/snapshot 字段
   if (['snapshot','full','list'].includes(type)) {
-    const list = _pick(message, ['data','opps','items','list'], []);
+    const list = _pick(message, ['data','opps','items','list','rows','payload','snapshot'], []);
     const opps = Array.isArray(list) ? list.map(_normalizeOpp).filter(Boolean) : [];
     return { type: 'snapshot', data: opps, ts };
   }
 
   if (['opportunity','delta','change','upd','update'].includes(type)) {
-    const raw = _pick(message, ['data','opp','item','record'], null);
+    const raw = _pick(message, ['data','opp','item','record','payload'], null);
     const opp = _normalizeOpp(raw);
     if (!opp) return { type:'heartbeat', ts };
     return { type: 'opportunity', data: opp, ts };
   }
 
   // 兜底
-  const list = _pick(message, ['data','opps','items','list'], null);
+  const list = _pick(message, ['data','opps','items','list','rows','payload'], null);
   if (Array.isArray(list)) {
     return { type: 'snapshot', data: list.map(_normalizeOpp).filter(Boolean), ts };
   }
@@ -467,7 +459,7 @@ function handleWebSocketMessage(message) {
   }
 }
 
-/* ===== 补充缺失：快照 & 单条机会处理 ===== */
+/* ===== 快照 & 单条机会处理 ===== */
 function handleSnapshot(opps) {
   try {
     // 清空当前盘面与已提醒
@@ -475,13 +467,12 @@ function handleSnapshot(opps) {
     alertedSignatures.clear();
 
     // 清空套利表
-    const tbody = document.querySelector('#arbitrageTable tbody');
-    if (tbody) tbody.innerHTML = `<tr class="no-data"><td colspan="8">暂无数据</td></tr>`;
+    clearArbitrageTable();
 
     // 重新发现书商
-    discoveredBooks.clear();
+    clearDiscoveredBooks();
 
-    // 仅把数据写入盘面（避免在大快照时反复计算）
+    // 把数据写入盘面
     for (const opp of (opps || [])) {
       if (!opp) continue;
       if (opp.pickA?.book) addDiscoveredBook(opp.pickA.book);
@@ -569,16 +560,16 @@ function updateMarketBoard(opp) {
   const cur = ensureEventContainer(key);
 
   if (opp.league) cur.league = opp.league;
-  if (opp.event_name) {
-    if (opp.home && opp.away) {
-      cur.home = opp.home;
-      cur.away = opp.away;
-    } else {
-      const [h,a] = opp.event_name.split(' vs ').map(s=>s?.trim()||'');
-      if (h) cur.home = h;
-      if (a) cur.away = a;
-    }
+
+  // 写主客队/赛事名
+  if (opp.home) cur.home = opp.home;
+  if (opp.away) cur.away = opp.away;
+  if ((!cur.home || !cur.away) && opp.event_name) {
+    const [h,a] = opp.event_name.split(' vs ').map(s=>s?.trim()||'');
+    if (h && !cur.home) cur.home = h;
+    if (a && !cur.away) cur.away = a;
   }
+
   if (opp.score != null) cur.score = opp.score;
 
   // 开赛时间
@@ -672,6 +663,9 @@ function generateSignature(opp) {
 /* ------------------ 套利表格 ------------------ */
 function addArbitrageOpportunity(result, shouldAlert) {
   const tbody = document.querySelector('#arbitrageTable tbody');
+  // ✅ 防护：没有表格时直接跳过，不要打断整个流程
+  if (!tbody) return;
+
   const sig = result.signature;
   const minProfit = parseInt(settings.stake?.minProfit)||0;
 
@@ -712,7 +706,7 @@ function createArbitrageRow(result) {
   const lineText = opp.line_text || (opp.line_numeric?.toString()||'');
 
   row.innerHTML = `
-    <td>${opp.event_name||''}</td>
+    <td>${opp.event_name||(`${opp.home||''} vs ${opp.away||''}`)}</td>
     <td>${marketText} ${lineText}</td>
     <td>${result.sideA} (${result.pickA.selection})</td>
     <td>${result.sideB} (${result.pickB.selection})</td>
@@ -746,10 +740,11 @@ function clearArbitrageTable() {
 /* 按当前盘口数据“重新配对重算” */
 function recalculateAllArbitrageOpportunities() {
   const tbody = document.querySelector('#arbitrageTable tbody');
+  // ✅ 防护：没有套利表格直接返回，避免打断市场总览
   if (!tbody) return;
   clearArbitrageTable();
 
-  marketBoard.forEach((data, eventId) => {
+  marketBoard.forEach((data, eventKey) => {
     // OU：over 书商 × under 书商
     const ouEntries = Array.from(data.ouMap.entries()); // [book, {line, over, under}]
     for (const [bOver, eOver] of ouEntries) {
@@ -757,7 +752,7 @@ function recalculateAllArbitrageOpportunities() {
         if (bOver === bUnder) continue;
         if (eOver?.over && eUnder?.under) {
           const opp = {
-            event_id: eventId,
+            event_id: eventKey,
             event_name: `${data.home} vs ${data.away}`,
             league: data.league,
             market: 'ou',
@@ -765,7 +760,8 @@ function recalculateAllArbitrageOpportunities() {
             line_numeric: parseFloat(eOver.line||eUnder.line)||0,
             pickA: { book:bOver,  selection:'over',  odds: eOver.over  },
             pickB: { book:bUnder, selection:'under', odds: eUnder.under },
-            score: data.score
+            score: data.score,
+            home: data.home, away: data.away
           };
           const r = calculateArbitrage(opp);
           if (r) addArbitrageOpportunity(r,false);
@@ -780,7 +776,7 @@ function recalculateAllArbitrageOpportunities() {
         if (bHome === bAway) continue;
         if (eHome?.home && eAway?.away) {
           const opp = {
-            event_id: eventId,
+            event_id: eventKey,
             event_name: `${data.home} vs ${data.away}`,
             league: data.league,
             market: 'ah',
@@ -788,7 +784,8 @@ function recalculateAllArbitrageOpportunities() {
             line_numeric: parseFloat(eHome.line||eAway.line)||0,
             pickA: { book:bHome, selection:'home', odds: eHome.home },
             pickB: { book:bAway, selection:'away', odds: eAway.away },
-            score: data.score
+            score: data.score,
+            home: data.home, away: data.away
           };
           const r = calculateArbitrage(opp);
           if (r) addArbitrageOpportunity(r,false);
@@ -808,7 +805,7 @@ function sendAlert(result) {
   const marketText = opp.market === 'ah' ? '让球' : '大小球';
   const lineText   = opp.line_text || (opp.line_numeric?.toString() || '');
   const league     = opp.league || '';
-  const teams      = opp.event_name || '';
+  const teams      = opp.event_name || `${opp.home||''} vs ${opp.away||''}`;
   const sA         = settings.stake?.amountA || 10000;
 
   const title = `套利机会 · ${league} · ${teams}`;
@@ -1404,4 +1401,3 @@ document.addEventListener('DOMContentLoaded', ()=>{
   initUI(loaded);
   connectWS();
 });
-
