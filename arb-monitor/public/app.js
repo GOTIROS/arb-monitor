@@ -1,6 +1,6 @@
 /* =======================================================
    arb-monitor — public/app.js
-   生产版（无删减；含模拟开关；兼容实盘WS；修复港盘&时间戳）
+   生产版（无模拟数据；兼容实盘WS；修复港盘&时间戳）
    ======================================================= */
 'use strict';
 
@@ -27,7 +27,7 @@ let sortMode = 'time'; // 'time' | 'league'
 const rowOrder = new Map(); // key: eventKey|book -> stable index
 let rowSeq = 0;
 
-/* >>>>>>>>>>>>>>>>>>>>>  模拟数据开关  <<<<<<<<<<<<<<<<<<<<<< */
+/* >>>>>>>>>>>>>>>>>>>>>  新增：本地模拟  <<<<<<<<<<<<<<<<<<<<<< */
 let mockTimers = [];
 function stopMock(){ try{ mockTimers.forEach(clearInterval);}catch(_){ } mockTimers=[]; }
 function connectMock(){
@@ -56,7 +56,7 @@ function connectMock(){
     handleWebSocketMessage({ type:'snapshot', data:[ou,ah], ts:Date.now() });
   }, 5000));
 }
-/* >>>>>>>>>>>>>>>>>>>>>  模拟结束  <<<<<<<<<<<<<<<<<<<<<< */
+/* >>>>>>>>>>>>>>>>>>>>>  本地模拟结束  <<<<<<<<<<<<<<<<<<<<<< */
 
 /* ------------------ 常用函数 ------------------ */
 function rowKey(eventKey, book) { return `${eventKey}|${(book||'').toLowerCase()}`; }
@@ -90,7 +90,7 @@ function zhSel(sel){
 
 /* ------------------ 默认设置 ------------------ */
 const DEFAULT_SETTINGS = {
-  datasource: { wsMode:'auto', wsUrl:'', token:'', mockEnabled:false }, // 带模拟开关
+  datasource: { wsMode:'auto', wsUrl:'', token:'', mockEnabled:false }, // <<< 新增 mockEnabled
   books: {},
   rebates: {},                   // 旧字段保留
   rebateA: { book:'', rate:0 },  // A 平台（书商+返水）
@@ -142,11 +142,13 @@ function getEventKey(opp){ return `${opp.league || ''}|${opp.event_name || ''}`;
 
 /* ------------------ WebSocket ------------------ */
 function connectWS() {
-  // 若开启了模拟，走本地模拟，不连真实 WS
+  // <<< 新增：若开启了模拟，走本地模拟，不连真实 WS
   if (settings.datasource?.mockEnabled) {
-    stopMock(); connectMock(); return;
+    stopMock();
+    connectMock();
+    return;
   }
-  stopMock(); // 切回真实时停止 mock
+  stopMock(); // 确保切回真实时停止 mock
 
   if (ws && (ws.readyState===WebSocket.CONNECTING || ws.readyState===WebSocket.OPEN)) return;
   if (settings.datasource?.wsMode==='custom' && !(settings.datasource?.wsUrl||'').trim()) {
@@ -191,8 +193,8 @@ function connectWS() {
   }
 }
 function reconnectNow(){ 
-  stopMock();
-  try{ ws && ws.close(); }catch(_){} 
+  stopMock(); // <<< 新增：手动重连前停掉 mock
+  if (ws) ws.close(); 
   if (wsReconnectTimer){ clearTimeout(wsReconnectTimer); wsReconnectTimer=null; } 
   wsReconnectAttempts=0; 
   setTimeout(connectWS, 120); 
@@ -900,7 +902,7 @@ function initDatasourcePanel(){
   else { wsModeAuto && (wsModeAuto.checked=true); wsUrlInput && (wsUrlInput.disabled=true); }
   wsUrlInput && (wsUrlInput.value=ds.wsUrl||''); wsTokenInput && (wsTokenInput.value=ds.token||'');
 
-  // 模拟开关（任一选择器能命中即可）
+  // >>> 新增：使用模拟数据开关（任一选择器能命中即可）
   const mockSwitch = document.querySelector('#use-mock, input[name="use-mock"], [data-mock]');
   if (mockSwitch){
     mockSwitch.disabled = false;
