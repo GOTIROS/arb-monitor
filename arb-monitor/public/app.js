@@ -84,7 +84,15 @@ function formatTime(date=new Date()) {
 function prettyBook(b){ b = (b||'').toString(); return b.charAt(0).toUpperCase()+b.slice(1); }
 function zhMarket(m){ return m==='ah' ? '让球' : '大小球'; }
 function zhSel(sel){
-  switch((sel||'').toString().toLowerCase()){
+ 
+   // 只用于显示：把赔率四舍五入为 2 位小数（null/undefined/NaN 显示为 '-')
+function fmtOdd(o, digits = 2) {
+  const n = Number(o);
+  if (!Number.isFinite(n)) return '-';
+  return n.toFixed(digits);
+}
+ 
+   switch((sel||'').toString().toLowerCase()){
     case 'home': return '主';
     case 'away': return '客';
     case 'over': return '大';
@@ -759,8 +767,8 @@ function renderMarketBoard(){
       const ouE=data.ouMap.get(book), ahE=data.ahMap.get(book);
       rows.push({
         rk, stable:rowOrder.get(rk), book, league:data.league||'', home:data.home||'', away:data.away||'', score:data.score||'',
-        ouText: ouE?`${ouE.line||''} (${ouE.over ?? '-'} / ${ouE.under ?? '-'})`:'-',
-        ahText: ahE?`${ahE.line||''} (${ahE.home ?? '-'} / ${ahE.away ?? '-'})`:'-',
+        ouText: ouE ? `${ouE.line || ''} (${fmtOdd(ouE.over)} / ${fmtOdd(ouE.under)})` : '-',
+ahText: ahE ? `${ahE.line || ''} (${fmtOdd(ahE.home)} / ${fmtOdd(ahE.away)})` : '-',
         kickoffAt:data.kickoffAt||0, updatedAt:data.updatedAt||0
       });
     });
@@ -1036,3 +1044,4 @@ window.__ARB_DEBUG__ = {
   board: marketBoard,
   books: discoveredBooks
 };
+
