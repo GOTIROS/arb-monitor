@@ -431,36 +431,48 @@ function _normalizeMessage(message){
     return { type:'snapshot', data: message.map(_normalizeOpp).filter(Boolean), ts: Date.now() };
   }
 
-  let type=_str(message.type).toLowerCase();
+  let type = _str(message.type).toLowerCase();
   const ts  = message.ts || Date.now();
 
   if(!type || type==='ping' || type==='hello') return { type:'heartbeat', ts };
   if(type==='heartbeat') return { type:'heartbeat', ts };
 
   if(['snapshot','full','list'].includes(type)){
-    const list=_extractList(message);
-    const opps=Array.isArray(list) ? list.map(_normalizeOpp).filter(Boolean) : [];
-    console.log('snapshot count:', opps.length);
-    return { type:'snapshot', data: opps, ts };
+    // 1) 先找数组（rows/list/items/...）
+    const list = _extractList(message);
+    if (Array.isArray(list)) {
+      const opps = list.map(_normalizeOpp).filter(Boolean);
+      console.log('snapshot count:', opps.length);
+      return { type:'snapshot', data: opps, ts };
+    }
+    // 2) 兼容：snapshot 携带单条对象（data 为单对象）
+    const oneRaw = _extractOpp(message) || message.data || message.payload || null;
+    const oneOpp = _normalizeOpp(oneRaw);
+    if (oneOpp) {
+      console.log('snapshot count: 1 (single object)');
+      return { type:'snapshot', data: [oneOpp], ts };
+    }
+    console.warn('snapshot with no rows/opp', message);
+    return { type:'heartbeat', ts }; // 忽略这条
   }
 
   if(['opportunity','delta','change','upd','update'].includes(type)){
-    const raw=_extractOpp(message);
-    const opp=_normalizeOpp(raw);
+    const raw = _extractOpp(message);
+    const opp = _normalizeOpp(raw);
     if(!opp) return { type:'heartbeat', ts };
     return { type:'opportunity', data: opp, ts };
   }
 
   // 无类型：尝试解析
-  const list2=_extractList(message);
+  const list2 = _extractList(message);
   if(Array.isArray(list2)){
-    const opps=list2.map(_normalizeOpp).filter(Boolean);
+    const opps = list2.map(_normalizeOpp).filter(Boolean);
     console.log('snapshot count:', opps.length);
     return { type:'snapshot', data: opps, ts };
   }
-  const raw2=_extractOpp(message);
+  const raw2 = _extractOpp(message);
   if(raw2){
-    const opp=_normalizeOpp(raw2);
+    const opp = _normalizeOpp(raw2);
     if(opp) return { type:'opportunity', data: opp, ts };
   }
   return null;
@@ -1331,4 +1343,5 @@ document.addEventListener('DOMContentLoaded', ()=>{
   initUI(loaded);
   connectWS();
 });
+
 
