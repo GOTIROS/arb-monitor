@@ -467,6 +467,55 @@ function handleWebSocketMessage(message) {
   }
 }
 
+/* ===== 补充缺失：快照 & 单条机会处理 ===== */
+function handleSnapshot(opps) {
+  try {
+    // 清空当前盘面与已提醒
+    marketBoard.clear();
+    alertedSignatures.clear();
+
+    // 清空套利表
+    const tbody = document.querySelector('#arbitrageTable tbody');
+    if (tbody) tbody.innerHTML = `<tr class="no-data"><td colspan="8">暂无数据</td></tr>`;
+
+    // 重新发现书商
+    discoveredBooks.clear();
+
+    // 仅把数据写入盘面（避免在大快照时反复计算）
+    for (const opp of (opps || [])) {
+      if (!opp) continue;
+      if (opp.pickA?.book) addDiscoveredBook(opp.pickA.book);
+      if (opp.pickB?.book) addDiscoveredBook(opp.pickB.book);
+      updateMarketBoard(opp);
+    }
+
+    // 刷新 UI 与统一配对重算
+    renderBookList();
+    renderRebateSettings();
+    updateABookOptions();
+    renderMarketBoard();
+    recalculateAllArbitrageOpportunities();
+  } catch (e) {
+    console.error('handleSnapshot error:', e);
+  }
+}
+
+function handleOpportunity(opp) {
+  try {
+    if (!opp) return;
+    if (opp.pickA?.book) addDiscoveredBook(opp.pickA.book);
+    if (opp.pickB?.book) addDiscoveredBook(opp.pickB.book);
+
+    // 单条机会：更新盘面 + 即时计算（允许弹窗/声音）
+    processOpportunity(opp, true);
+
+    // 刷新盘口总览
+    renderMarketBoard();
+  } catch (e) {
+    console.error('handleOpportunity error:', e);
+  }
+}
+
 /* ------------------ 盘口 & 套利计算 ------------------ */
 function processOpportunity(opp, shouldAlert) {
   if (!opp?.event_id && !opp?.event_name) return;
@@ -1355,3 +1404,4 @@ document.addEventListener('DOMContentLoaded', ()=>{
   initUI(loaded);
   connectWS();
 });
+
