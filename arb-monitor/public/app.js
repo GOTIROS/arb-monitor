@@ -324,67 +324,101 @@ function _extractOpp(obj){
   return null;
 }
 
-/** 规格化一条机会 Opp */
+/** 规格化一条机会 Opp —— 兼容 raw.pickA / raw.pickB */
 function _normalizeOpp(raw){
-  if(!raw || typeof raw!=='object') return null;
+  if (!raw || typeof raw !== 'object') return null;
 
-  const league=_str(_pick(raw,['league','leagueName','league_name','league_cn','联赛','联赛名'],''));
-  const home  =_str(_pick(raw,['home','homeTeam','home_name','主队','team_a'],''));
-  const away  =_str(_pick(raw,['away','awayTeam','away_name','客队','team_b'],''));
-  const eventName=_str(_pick(raw,['event_name','eventName','赛事','比赛','match_name'],(home&&away)?`${home} vs ${away}`:''));
+  const league = _str(_pick(raw, ['league','leagueName','league_name','league_cn','联赛','联赛名'], ''));
+  const home   = _str(_pick(raw, ['home','homeTeam','home_name','主队','team_a'], ''));
+  const away   = _str(_pick(raw, ['away','awayTeam','away_name','客队','team_b'], ''));
+  const eventName = _str(_pick(raw, ['event_name','eventName','赛事','比赛','match_name'], (home && away) ? `${home} vs ${away}` : ''));
 
-  const lineText=_str(_pick(raw,['line_text','lineText','line','handicap','ah','ou','total','盘口','大小'],''));
-  const lineNum =_num(_pick(raw,['line_numeric','lineNum','lineValue','total_points','handicap_value'],undefined));
+  const lineText = _str(_pick(raw, ['line_text','lineText','line','handicap','ah','ou','total','盘口','大小'], ''));
+  const lineNum  = _num(_pick(raw, ['line_numeric','lineNum','lineValue','total_points','handicap_value'], undefined));
 
-  const overOdds =_num(_pick(raw,['over_odds','o_odds','odds_over','overOdds'],undefined));
-  const underOdds=_num(_pick(raw,['under_odds','u_odds','odds_under','underOdds'],undefined));
-  const homeOdds =_num(_pick(raw,['home_odds','h_odds','odds_home','odds1','homeOdds'],undefined));
-  const awayOdds =_num(_pick(raw,['away_odds','a_odds','odds_away','odds2','awayOdds'],undefined));
-  const oddsA    =_num(_pick(raw,['oddsA','odds_a','pickA_odds','aOdds'],undefined));
-  const oddsB    =_num(_pick(raw,['oddsB','odds_b','pickB_odds','bOdds'],undefined));
+  const overOdds  = _num(_pick(raw, ['over_odds','o_odds','odds_over','overOdds'], undefined));
+  const underOdds = _num(_pick(raw, ['under_odds','u_odds','odds_under','underOdds'], undefined));
+  const homeOdds  = _num(_pick(raw, ['home_odds','h_odds','odds_home','odds1','homeOdds'], undefined));
+  const awayOdds  = _num(_pick(raw, ['away_odds','a_odds','odds_away','odds2','awayOdds'], undefined));
+  const oddsA     = _num(_pick(raw, ['oddsA','odds_a','pickA_odds','aOdds'], undefined));
+  const oddsB     = _num(_pick(raw, ['oddsB','odds_b','pickB_odds','bOdds'], undefined));
 
-  let selA=_normSel(_pick(raw,['selA','selectionA','pickA_sel','pickA_selection','selection_a'],''));
-  let selB=_normSel(_pick(raw,['selB','selectionB','pickB_sel','pickB_selection','selection_b'],''));
-  let bookA=_str(_pick(raw,['bookA','book_a','pickA_book','bookNameA','a_book','aBook','book1','book'],''));
-  let bookB=_str(_pick(raw,['bookB','book_b','pickB_book','bookNameB','b_book','bBook','book2','bookAlt'],''));
-  bookA=bookA.toLowerCase(); bookB=bookB.toLowerCase();
+  // 顶层可能带 bookA/bookB（但很多时候没有）
+  const topBookA = _str(_pick(raw, ['bookA','book_a','pickA_book','bookNameA','a_book','aBook','book1'], ''));
+  const topBookB = _str(_pick(raw, ['bookB','book_b','pickB_book','bookNameB','b_book','bBook','book2','bookAlt'], ''));
+
+  let selA = _normSel(_pick(raw, ['selA','selectionA','pickA_sel','pickA_selection','selection_a'], ''));
+  let selB = _normSel(_pick(raw, ['selB','selectionB','pickB_sel','pickB_selection','selection_b'], ''));
 
   let pickA, pickB;
-  if(overOdds && underOdds){
-    if(!selA) selA='over'; if(!selB) selB='under';
-    pickA={book:bookA||'bookA', selection:selA, odds:overOdds};
-    pickB={book:bookB||'bookB', selection:selB, odds:underOdds};
-  }else if(homeOdds && awayOdds){
-    if(!selA) selA='home'; if(!selB) selB='away';
-    pickA={book:bookA||'bookA', selection:selA, odds:homeOdds};
-    pickB={book:bookB||'bookB', selection:selB, odds:awayOdds};
-  }else if(oddsA && oddsB && selA && selB){
-    pickA={book:bookA||'bookA', selection:selA, odds:oddsA};
-    pickB={book:bookB||'bookB', selection:selB, odds:oddsB};
-  }else{
-    const picks=_pick(raw,['picks','quotes','markets','legs'],[]);
-    if(Array.isArray(picks) && picks.length>=2){
-      const p1=picks[0]||{}, p2=picks[1]||{};
-      pickA={book:_str(p1.book||p1.bk||'bookA').toLowerCase(), selection:_normSel(p1.selection||p1.sel), odds:_num(p1.odds)};
-      pickB={book:_str(p2.book||p2.bk||'bookB').toLowerCase(), selection:_normSel(p2.selection||p2.sel), odds:_num(p2.odds)};
+
+  // ✅ 1) 明确兼容：raw.pickA / raw.pickB
+  if (raw.pickA && raw.pickB) {
+    const p1 = raw.pickA || {};
+    const p2 = raw.pickB || {};
+    pickA = {
+      book: _str(p1.book || p1.bk || p1.book_name || p1.name || topBookA || 'bookA').toLowerCase(),
+      selection: _normSel(p1.selection || p1.sel),
+      odds: _num(p1.odds)
+    };
+    pickB = {
+      book: _str(p2.book || p2.bk || p2.book_name || p2.name || topBookB || 'bookB').toLowerCase(),
+      selection: _normSel(p2.selection || p2.sel),
+      odds: _num(p2.odds)
+    };
+  }
+
+  // 2) over/under 成对赔率
+  if ((!pickA || !pickB) && overOdds && underOdds) {
+    if (!selA) selA = 'over';
+    if (!selB) selB = 'under';
+    pickA = pickA || { book: (topBookA || (pickA && pickA.book) || 'bookA').toLowerCase(), selection: selA, odds: overOdds };
+    pickB = pickB || { book: (topBookB || (pickB && pickB.book) || 'bookB').toLowerCase(), selection: selB, odds: underOdds };
+  }
+
+  // 3) home/away 成对赔率
+  if ((!pickA || !pickB) && homeOdds && awayOdds) {
+    if (!selA) selA = 'home';
+    if (!selB) selB = 'away';
+    pickA = pickA || { book: (topBookA || (pickA && pickA.book) || 'bookA').toLowerCase(), selection: selA, odds: homeOdds };
+    pickB = pickB || { book: (topBookB || (pickB && pickB.book) || 'bookB').toLowerCase(), selection: selB, odds: awayOdds };
+  }
+
+  // 4) A/B + selA/selB
+  if ((!pickA || !pickB) && oddsA && oddsB && (selA || selB)) {
+    pickA = pickA || { book: (topBookA || 'bookA').toLowerCase(), selection: selA, odds: oddsA };
+    pickB = pickB || { book: (topBookB || 'bookB').toLowerCase(), selection: selB, odds: oddsB };
+  }
+
+  // 5) picks 数组兜底
+  if (!pickA || !pickB) {
+    const picks = _pick(raw, ['picks','quotes','markets','legs'], []);
+    if (Array.isArray(picks) && picks.length >= 2) {
+      const p1 = picks[0] || {}, p2 = picks[1] || {};
+      pickA = { book: _str(p1.book || p1.bk || p1.book_name || 'bookA').toLowerCase(), selection: _normSel(p1.selection || p1.sel), odds: _num(p1.odds) };
+      pickB = { book: _str(p2.book || p2.bk || p2.book_name || 'bookB').toLowerCase(), selection: _normSel(p2.selection || p2.sel), odds: _num(p2.odds) };
     }
   }
-  if(!pickA || !pickB) return null;
-  if(!(pickA.odds>1 && pickB.odds>1)) return null;
 
-  let market=_normMarket(_pick(raw,['market','market_type','mkt','type','玩法'],''), pickA, pickB);
-  const eventId=_pick(raw,['event_id','eventId','match_id','fid','mid','id'],`${home}-${away}-${lineText}`);
+  // 无效就丢弃
+  if (!pickA || !pickB) return null;
+  if (!(pickA.odds > 1 && pickB.odds > 1)) return null;
+
+  // 市场类型推断（让球/大小）
+  const market = _normMarket(_pick(raw, ['market','market_type','mkt','type','玩法'], ''), pickA, pickB);
+
+  const eventId = _pick(raw, ['event_id','eventId','match_id','fid','mid','id'], `${home}-${away}-${lineText}`);
 
   return {
-    event_id:eventId,
-    event_name:eventName,
+    event_id: eventId,
+    event_name: eventName,
     league, home, away,
-    score:_str(_pick(raw,['score','sc','比分'],'')),
+    score: _str(_pick(raw, ['score','sc','比分'], '')),
     market,
-    line_text: lineText || (lineNum!=null ? String(lineNum) : ''),
-    line_numeric:(lineNum!=null ? lineNum : undefined),
+    line_text: lineText || (lineNum != null ? String(lineNum) : ''),
+    line_numeric: (lineNum != null ? lineNum : undefined),
     pickA, pickB,
-    kickoffAt:_pick(raw,['kickoffAt','kickoff_at','kickoff','matchTime','match_time','start_time','start_ts','startTime'],undefined)
+    kickoffAt: _pick(raw, ['kickoffAt','kickoff_at','kickoff','matchTime','match_time','start_time','start_ts','startTime'], undefined)
   };
 }
 
@@ -1297,3 +1331,4 @@ document.addEventListener('DOMContentLoaded', ()=>{
   initUI(loaded);
   connectWS();
 });
+
