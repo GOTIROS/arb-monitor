@@ -876,18 +876,30 @@ function playNotificationSound(){
 let _marketTbodyCache = null;
 function findMarketTbody(){
   if (_marketTbodyCache && document.body.contains(_marketTbodyCache)) return _marketTbodyCache;
-  let el = document.querySelector('#marketTable tbody');
-  if (!el) el = document.querySelector('#market-board tbody') || document.querySelector('#board tbody');
-  if (el) { _marketTbodyCache = el; return el; }
+
+  // 1) 优先已知 id
+  let el = document.querySelector('#marketTable tbody')
+        || document.querySelector('#market-board tbody')
+        || document.querySelector('#board tbody')
+        || document.querySelector('#panel-marketboard table tbody');
+  if (el){ _marketTbodyCache = el; return el; }
+
+  // 2) 在所有 table 中查找包含“书商/联赛/主队/客队”的头
   const tables = Array.from(document.querySelectorAll('table'));
   for (const t of tables){
-    const headText = (t.tHead?.innerText || t.querySelector('thead')?.innerText || '').replace(/\s+/g,'');
-    if (headText.includes('书商') && headText.includes('联赛') && headText.includes('主队') && headText.includes('客队')){
+    const thead = t.tHead || t.querySelector('thead');
+    const headText = (thead?.innerText || '').replace(/\s+/g,'');
+    if (headText && headText.includes('书商') && headText.includes('联赛') && headText.includes('主队') && headText.includes('客队')){
       const tb = t.tBodies?.[0] || t.querySelector('tbody');
       if (tb){ _marketTbodyCache = tb; return tb; }
     }
   }
-  _marketTbodyCache = document.querySelector('tbody');
+
+  // 3) 退化：取页面上的第一个或第二个 tbody
+  _marketTbodyCache = document.querySelector('#panel-marketboard tbody')
+                      || document.querySelectorAll('tbody')[0]
+                      || document.querySelectorAll('tbody')[1]
+                      || document.querySelector('tbody');
   return _marketTbodyCache;
 }
 
@@ -902,14 +914,14 @@ function renderMarketBoard(){
   tbody.innerHTML='';
   if (marketBoard.size===0){ tbody.innerHTML='<tr class="no-data"><td colspan="8">暂无数据</td></tr>'; return; }
 
-  const enabled = new Set(Array.from(discoveredBooks).filter(b => settings.books[b] !== false).map(b => normBookKey(b)));
-  // 若用户未勾选任何书商，但已经动态发现到了书商，则默认展示全部书商（防止把数据全过滤掉）
-  const showAllWhenNoneSelected = enabled.size === 0 && discoveredBooks.size > 0;
+  // 允许“未勾选任何书商”时也展示全部（不依赖 discoveredBooks）
+  const enabledList = Array.from(discoveredBooks).filter(b => settings.books[b] !== false).map(b => normBookKey(b));
+  const enabled = new Set(enabledList);
+  const useAll = enabled.size === 0; // 不再依赖 discoveredBooks.size
   const rows=[];
   for (const [eventId, data] of marketBoard.entries()) {
-    const enabledBooks = showAllWhenNoneSelected
-      ? [...data.books]
-      : [...data.books].filter(b => enabled.has(normBookKey(b)));
+    const pool = Array.from(data.books || []);
+    const enabledBooks = useAll ? pool : pool.filter(b => enabled.has(normBookKey(b)));
     if (enabledBooks.length === 0) continue;
     enabledBooks.forEach(book => {
       const rk = rowKey(eventId, book); if (!rowOrder.has(rk)) rowOrder.set(rk, ++rowSeq);
@@ -923,6 +935,12 @@ function renderMarketBoard(){
     });
   }
   if (rows.length===0){ tbody.innerHTML='<tr class="no-data"><td colspan="8">暂无数据</td></tr>'; return; }
+
+  // 保障：若 rows 仍为空，给出占位
+  if (!rows.length){
+    tbody.innerHTML = '<tr class="no-data"><td colspan="8">暂无数据</td></tr>';
+    return;
+  }
 
   if (sortMode==='league'){
     rows.sort((a,b)=>{ const l=a.league.localeCompare(b.league); if(l)return l; const t=(a.kickoffAt||a.updatedAt)-(b.kickoffAt||b.updatedAt); if(t)return t; return a.stable-b.stable; });
