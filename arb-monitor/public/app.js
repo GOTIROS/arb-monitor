@@ -9,8 +9,8 @@ const __norm = { raw:0, parsed:0, oppOk:0, books:0, lastType:'' };
 window.__normStats = __norm;
 
 /* ------------------ 全局变量 ------------------ */
-let ws = null;                  // WebSocket
-let es = null;                  // EventSource (SSE)
+let ws = null;          // WebSocket 句柄
+let es = null;          // EventSource 句柄（SSE）
 let wsReconnectAttempts = 0;
 let wsReconnectTimer = null;
 let lastHeartbeat = 0;
@@ -223,78 +223,146 @@ function connectSSE(url) {
   }
 }
 
-/* ------------------ WebSocket ------------------ */
-function connectWS(urlFromCaller) {
-  if (settings.datasource?.mockEnabled) {
+/* ------------------ WebSocket / SSE ------------------ */
+function isHttpUrl(u){ return /^https?:\/\//i.test(String(u||'')); }
+function isWsUrl(u){  return /^wss?:\/\//i.test(String(u||'')); }
+
+function connectWS(){
+  // 若开启了模拟，走本地模拟
+  if (settings.datasource?.mockEnabled){
     stopMock(); connectMock(); return;
   }
-  stopMock();
+  stopMock(); // 切回真实时停止 mock
 
-  if (ws && (ws.readyState===WebSocket.CONNECTING || ws.readyState===WebSocket.OPEN)) return;
-  if (settings.datasource?.wsMode==='custom' && !(settings.datasource?.wsUrl||'').trim()) {
-    updateConnectionStatus('connecting'); return;
+  // 已有连接就不重复创建
+  const isAliveWS = ws && (ws.readyState===WebSocket.CONNECTING || ws.readyState===WebSocket.OPEN);
+  if (isAliveWS) return;
+  // SSE 也先关闭（避免两种并存）
+  if (es){ try{ es.close(); }catch(_){} es=null; }
+
+  // 读取目标地址
+  let url;
+  if (settings.datasource?.wsMode==='custom'){
+    url = (settings.datasource.wsUrl||'').trim();
+    if (!url){ updateConnectionStatus('connecting'); return; }
+  }else{
+    // 自动模式：默认走 WS 出口
+    const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
+    url = `${protocol}://${location.host}/ws/opps`;
   }
 
-  let wsUrl;
-  if (urlFromCaller) {
-    wsUrl = urlFromCaller;
-  } else if (settings.datasource?.wsMode==='custom') {
-    wsUrl = settings.datasource.wsUrl.trim();
-  } else {
-    const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
-    wsUrl = `${protocol}://${location.host}/ws/opps`;
+  // http/https 走 SSE；ws/wss 走 WebSocket
+  if (isHttpUrl(url)) return connectSSE(url);
+  if (!isWsUrl(url)){
+    // 兜底：如果用户只填了 /sse/opps 或 /ws/opps 这种相对路径
+    if (url.startsWith('/sse/')) return connectSSE(`${location.origin}${url}`);
+    const proto = (location.protocol==='https:'?'wss':'ws');
+    url = url.startsWith('/ws/') ? `${proto}://${location.host}${url}` : url;
   }
 
   updateConnectionStatus('connecting');
-  try {
-    ws = new WebSocket(wsUrl);
-    ws.onopen = () => { wsReconnectAttempts=0; updateConnectionStatus('connected'); startHeartbeatMonitor(); };
-
+  try{
+    ws = new WebSocket(url);
+    ws.onopen = () => {
+      wsReconnectAttempts = 0;
+      updateConnectionStatus('connected');
+      startHeartbeatMonitor();        // WS 才需要心跳
+    };
     ws.onmessage = async (ev) => {
       __norm.raw++;
-      try {
+      try{
         let text;
-        if (typeof ev.data === 'string') {
-          text = ev.data;
-        } else if (ev.data instanceof Blob && typeof ev.data.text === 'function') {
-          text = await ev.data.text();
-        } else { text = String(ev.data); }
+        if (typeof ev.data === 'string') text = ev.data;
+        else if (ev.data instanceof Blob && typeof ev.data.text === 'function') text = await ev.data.text();
+        else text = String(ev.data);
+
         const obj = JSON.parse(text);
         __norm.parsed++;
-        handleUnifiedMessage(obj);
-      } catch(e) {
-        console.error('解析消息失败:', e);
-      }
+        handleWebSocketMessage(obj);
+      }catch(e){ console.error('解析消息失败:', e); }
     };
-
-    ws.onclose = () => { updateConnectionStatus('reconnecting'); stopHeartbeatMonitor(); scheduleReconnect(); };
+    ws.onclose = () => {
+      updateConnectionStatus('reconnecting');
+      stopHeartbeatMonitor();
+      scheduleReconnect();
+    };
     ws.onerror = (err) => { console.error('WS 错误:', err); };
-  } catch (err) {
+  }catch(err){
     console.error('创建 WS 失败:', err);
-    updateConnectionStatus('reconnecting'); scheduleReconnect();
+    updateConnectionStatus('reconnecting');
+    scheduleReconnect();
   }
 }
 
-/* —— 统一入口：自动判别走 SSE/WS —— */
-function connectStream() {
-  if (settings.datasource?.mockEnabled) { stopMock(); connectMock(); return; }
-  stopMock();
-  const url = buildStreamUrl();
-  if (/^https?:/i.test(url)) connectSSE(url);     // http/https → SSE
-  else connectWS(url);                             // ws/wss     → WS
+// —— SSE 连接（EventSource）
+function connectSSE(url){
+  // 关闭 WS，避免并存
+  if (ws){ try{ ws.close(); }catch(_){} ws=null; }
+  if (es){ try{ es.close(); }catch(_){} es=null; }
+
+  updateConnectionStatus('connecting');
+  try{
+    es = new EventSource(url, { withCredentials:false });
+    es.onopen = () => {
+      wsReconnectAttempts = 0;
+      updateConnectionStatus('connected');
+      // SSE 是服务端 keep-alive，不需要浏览器心跳
+      stopHeartbeatMonitor();
+    };
+    es.onmessage = (ev) => {
+      lastHeartbeat = Date.now();
+      try{
+        // SSE 的每条消息在 ev.data
+        const text = ev.data || '';
+        if (!text) return;
+        const obj = JSON.parse(text);
+        handleWebSocketMessage(obj);
+      }catch(e){
+        // 遇到注释心跳或非 JSON，忽略即可
+      }
+    };
+    es.onerror = (e) => {
+      console.warn('SSE 错误/断开，准备重连', e);
+      updateConnectionStatus('reconnecting');
+      try{ es.close(); }catch(_){}
+      es = null;
+      scheduleReconnect();
+    };
+  }catch(err){
+    console.error('创建 SSE 失败:', err);
+    updateConnectionStatus('reconnecting');
+    scheduleReconnect();
+  }
 }
 
-function reconnectNow(){ 
+function reconnectNow(){
   stopMock();
-  try { if (ws) ws.close(); } catch(_){}
-  try { if (es) es.close(); } catch(_){}
-  if (wsReconnectTimer){ clearTimeout(wsReconnectTimer); wsReconnectTimer=null; } 
-  wsReconnectAttempts=0; 
-  setTimeout(connectStream, 120); 
+  if (ws){ try{ ws.close(); }catch(_){} ws=null; }
+  if (es){ try{ es.close(); }catch(_){} es=null; }
+  if (wsReconnectTimer){ clearTimeout(wsReconnectTimer); wsReconnectTimer=null; }
+  wsReconnectAttempts = 0;
+  setTimeout(connectWS, 120);
 }
-function scheduleReconnect(){ if (wsReconnectTimer) clearTimeout(wsReconnectTimer); wsReconnectAttempts++; const d=Math.min(30000, Math.pow(2, wsReconnectAttempts-1)*1000); wsReconnectTimer=setTimeout(connectWS, d); }
-function startHeartbeatMonitor(){ stopHeartbeatMonitor(); heartbeatTimer=setInterval(()=>{ if (lastHeartbeat && (Date.now()-lastHeartbeat>30000)) { try{ ws && ws.close(); }catch(_){}} }, 5000); }
-function stopHeartbeatMonitor(){ if (heartbeatTimer){ clearInterval(heartbeatTimer); heartbeatTimer=null; } }
+
+function scheduleReconnect(){
+  if (wsReconnectTimer) clearTimeout(wsReconnectTimer);
+  wsReconnectAttempts++;
+  const d = Math.min(30000, Math.pow(2, wsReconnectAttempts-1)*1000);
+  wsReconnectTimer = setTimeout(connectWS, d);
+}
+
+// 仅 WS 需要心跳（SSE 不需要）
+function startHeartbeatMonitor(){
+  stopHeartbeatMonitor();
+  heartbeatTimer = setInterval(()=>{
+    if (lastHeartbeat && (Date.now() - lastHeartbeat > 30000)){
+      try{ ws && ws.close(); }catch(_){}
+    }
+  }, 5000);
+}
+function stopHeartbeatMonitor(){
+  if (heartbeatTimer){ clearInterval(heartbeatTimer); heartbeatTimer=null; }
+}
 
 /* ------------------ 消息处理（兼容层） ------------------ */
 function _num(v){ const n=(typeof v==='string')?parseFloat(v):Number(v); return Number.isFinite(n)?n:undefined; }
@@ -1115,3 +1183,4 @@ window.__ARB_DEBUG__ = {
   board: marketBoard,
   books: discoveredBooks
 };
+
