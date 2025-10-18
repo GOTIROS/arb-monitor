@@ -168,7 +168,6 @@ function detectPeriod(raw, marketRaw){
 
   if (/\b(1h|fh|first[-_\s]?half|1st|上半|半场)\b/.test(bucket)) return 'HT';
   if (/\b(full|ft|全场)\b/.test(bucket)) return 'FT';
-  // 如果源专门给了 second half，可按需扩展
   return 'FT';
 }
 function zhPeriod(p){ return p==='HT' ? '上半' : '全场'; }
@@ -186,75 +185,41 @@ function buildStreamUrl() {
   return url.toString();
 }
 
-/* ------------------ SSE 连接 ------------------ */
-function connectSSE(url) {
-  try { if (es) es.close(); } catch(_) {}
-  es = null;
-
-  updateConnectionStatus('connecting');
-
-  try {
-    es = new EventSource(url, { withCredentials: false });
-
-    es.addEventListener('open', () => {
-      updateConnectionStatus('connected');
-    });
-
-    // 默认 message
-    es.addEventListener('message', (e) => {
-      try { handleUnifiedMessage(JSON.parse(e.data)); } catch(_){}
-    });
-
-    // 命名事件：heartbeat/snapshot/opportunity
-    ['heartbeat','snapshot','opportunity'].forEach(evt=>{
-      es.addEventListener(evt,(e)=>{
-        try { handleUnifiedMessage(JSON.parse(e.data)); } catch(_){}
-      });
-    });
-
-    // 错误交给浏览器自动重连，我们仅更新 UI
-    es.addEventListener('error', () => {
-      updateConnectionStatus('reconnecting');
-    });
-
-  } catch (err) {
-    console.error('创建 SSE 失败:', err);
-    updateConnectionStatus('reconnecting');
+/* ------------------ 统一连接入口 ------------------ */
+function connectStream(){
+  const url = buildStreamUrl();
+  if (/^https?:\/\//i.test(url)) {
+    connectSSE(url);
+  } else {
+    connectWS();
   }
 }
 
-/* ------------------ WebSocket / SSE ------------------ */
+/* ------------------ WebSocket ------------------ */
 function isHttpUrl(u){ return /^https?:\/\//i.test(String(u||'')); }
 function isWsUrl(u){  return /^wss?:\/\//i.test(String(u||'')); }
 
 function connectWS(){
-  // 若开启了模拟，走本地模拟
   if (settings.datasource?.mockEnabled){
     stopMock(); connectMock(); return;
   }
-  stopMock(); // 切回真实时停止 mock
+  stopMock();
 
-  // 已有连接就不重复创建
   const isAliveWS = ws && (ws.readyState===WebSocket.CONNECTING || ws.readyState===WebSocket.OPEN);
   if (isAliveWS) return;
-  // SSE 也先关闭（避免两种并存）
   if (es){ try{ es.close(); }catch(_){} es=null; }
 
-  // 读取目标地址
   let url;
   if (settings.datasource?.wsMode==='custom'){
     url = (settings.datasource.wsUrl||'').trim();
     if (!url){ updateConnectionStatus('connecting'); return; }
   }else{
-    // 自动模式：默认走 WS 出口
     const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
     url = `${protocol}://${location.host}/ws/opps`;
   }
 
-  // http/https 走 SSE；ws/wss 走 WebSocket
   if (isHttpUrl(url)) return connectSSE(url);
   if (!isWsUrl(url)){
-    // 兜底：如果用户只填了 /sse/opps 或 /ws/opps 这种相对路径
     if (url.startsWith('/sse/')) return connectSSE(`${location.origin}${url}`);
     const proto = (location.protocol==='https:'?'wss':'ws');
     url = url.startsWith('/ws/') ? `${proto}://${location.host}${url}` : url;
@@ -266,7 +231,7 @@ function connectWS(){
     ws.onopen = () => {
       wsReconnectAttempts = 0;
       updateConnectionStatus('connected');
-      startHeartbeatMonitor();        // WS 才需要心跳
+      startHeartbeatMonitor();
     };
     ws.onmessage = async (ev) => {
       __norm.raw++;
@@ -278,7 +243,7 @@ function connectWS(){
 
         const obj = JSON.parse(text);
         __norm.parsed++;
-        handleWebSocketMessage(obj);
+        handleUnifiedMessage(obj);
       }catch(e){ console.error('解析消息失败:', e); }
     };
     ws.onclose = () => {
@@ -294,40 +259,34 @@ function connectWS(){
   }
 }
 
-// —— SSE 连接（EventSource）
+/* ------------------ SSE 连接（EventSource） ------------------ */
 function connectSSE(url){
-  // 关闭 WS，避免并存
   if (ws){ try{ ws.close(); }catch(_){} ws=null; }
   if (es){ try{ es.close(); }catch(_){} es=null; }
 
   updateConnectionStatus('connecting');
   try{
     es = new EventSource(url, { withCredentials:false });
-    es.onopen = () => {
+
+    es.addEventListener('open', () => {
       wsReconnectAttempts = 0;
       updateConnectionStatus('connected');
-      // SSE 是服务端 keep-alive，不需要浏览器心跳
-      stopHeartbeatMonitor();
+      stopHeartbeatMonitor(); // SSE 无需浏览器心跳
+    });
+
+    const pass = (e) => {
+      try { handleUnifiedMessage(JSON.parse(e.data)); } catch(_){}
     };
-    es.onmessage = (ev) => {
-      lastHeartbeat = Date.now();
-      try{
-        // SSE 的每条消息在 ev.data
-        const text = ev.data || '';
-        if (!text) return;
-        const obj = JSON.parse(text);
-        handleWebSocketMessage(obj);
-      }catch(e){
-        // 遇到注释心跳或非 JSON，忽略即可
-      }
-    };
-    es.onerror = (e) => {
+    es.addEventListener('message', pass);
+    ['heartbeat','snapshot','opportunity'].forEach(evt=> es.addEventListener(evt, pass));
+
+    es.addEventListener('error', (e) => {
       console.warn('SSE 错误/断开，准备重连', e);
       updateConnectionStatus('reconnecting');
       try{ es.close(); }catch(_){}
       es = null;
       scheduleReconnect();
-    };
+    });
   }catch(err){
     console.error('创建 SSE 失败:', err);
     updateConnectionStatus('reconnecting');
@@ -335,23 +294,22 @@ function connectSSE(url){
   }
 }
 
+/* ------------------ 重连与心跳 ------------------ */
 function reconnectNow(){
   stopMock();
   if (ws){ try{ ws.close(); }catch(_){} ws=null; }
   if (es){ try{ es.close(); }catch(_){} es=null; }
   if (wsReconnectTimer){ clearTimeout(wsReconnectTimer); wsReconnectTimer=null; }
   wsReconnectAttempts = 0;
-  setTimeout(connectWS, 120);
+  setTimeout(connectStream, 120);
 }
-
 function scheduleReconnect(){
   if (wsReconnectTimer) clearTimeout(wsReconnectTimer);
   wsReconnectAttempts++;
   const d = Math.min(30000, Math.pow(2, wsReconnectAttempts-1)*1000);
-  wsReconnectTimer = setTimeout(connectWS, d);
+  wsReconnectTimer = setTimeout(connectStream, d);
 }
-
-// 仅 WS 需要心跳（SSE 不需要）
+// 仅 WS 需要心跳
 function startHeartbeatMonitor(){
   stopHeartbeatMonitor();
   heartbeatTimer = setInterval(()=>{
@@ -364,7 +322,7 @@ function stopHeartbeatMonitor(){
   if (heartbeatTimer){ clearInterval(heartbeatTimer); heartbeatTimer=null; }
 }
 
-/* ------------------ 消息处理（兼容层） ------------------ */
+/* ------------------ 消息处理（统一规范层） ------------------ */
 function _num(v){ const n=(typeof v==='string')?parseFloat(v):Number(v); return Number.isFinite(n)?n:undefined; }
 function _str(v){ if (v==null) return ''; return (typeof v==='string')?v:String(v); }
 function _pick(obj, keys, fallback){ for (const k of keys){ if (obj && obj[k]!=null && obj[k]!=='') return obj[k]; } return fallback; }
@@ -381,7 +339,6 @@ function _toDecimalOdds(o) {
   const n = Number(o);
   if (!Number.isFinite(n) || n <= 0) return undefined;
   if (FORCE_HK_ODDS) return n + 1;
-  // 若未来关闭强制，可以用旧策略：
   return n <= 1 ? (n + 1) : (n < 1.5 ? (n + 1) : n);
 }
 
@@ -449,7 +406,6 @@ function _normalizeOpp(raw){
   // —— 港赔转欧赔（强制）
   if (pickA.odds != null) pickA.odds = _toDecimalOdds(pickA.odds);
   if (pickB.odds != null) pickB.odds = _toDecimalOdds(pickB.odds);
-
   if (!((pickA.odds||0) > 0 && (pickB.odds||0) > 0)) return null;
 
   // —— 市场 & 半场
@@ -459,12 +415,10 @@ function _normalizeOpp(raw){
     : _normMarket(marketRaw, pickA, pickB);
 
   const period = detectPeriod(raw, marketRaw); // 'HT' 上半；默认 'FT'
-
-  // —— event id
   const eventId=_pick(raw,['event_id','eventId','match_id','fid','mid','id'], `${home}-${away}-${lineText}`);
 
   return {
-    event_id:eventId, event_name:eventName, league, period,   // ★ period
+    event_id:eventId, event_name:eventName, league, period,
     score:_str(_pick(raw,['score','sc','比分'],'')),
     market, line_text: lineText || (lineNum!=null?String(lineNum):''), line_numeric:(lineNum!=null?lineNum:undefined),
     pickA:{ book:String(pickA.book||'bookA').toLowerCase(), selection:_normSel(pickA.selection), odds:+pickA.odds },
@@ -657,7 +611,7 @@ function calculateArbitrage(opp){
 function generateSignature(opp, pickA, pickB, profit){
   const a = `${normBookKey(pickA?.book||'')}_${pickA?.selection||''}_${Math.round((+pickA?.odds||0)*1000)}`;
   const b = `${normBookKey(pickB?.book||'')}_${pickB?.selection||''}_${Math.round((+pickB?.odds||0)*1000)}`;
-  const base = `${getEventKey(opp)}_${opp.period||'FT'}_${opp.market}_${opp.line_text||opp.line_numeric||''}`; // ★ period 纳入签名
+  const base = `${getEventKey(opp)}_${opp.period||'FT'}_${opp.market}_${opp.line_text||opp.line_numeric||''}`;
   return `${base}__${[a,b].sort().join('__')}__p${profit}`;
 }
 
@@ -781,7 +735,7 @@ function recalculateAllArbitrageOpportunities(){
 }
 function clearArbitrageTable(){ const tbody = findArbTbody(); if (tbody) tbody.innerHTML=`<tr class="no-data"><td colspan="8">暂无数据</td></tr>`; }
 
-/* ------------------ 提醒（Toast） ------------------ */
+/* ------------------ 提醒（Toast/声音/系统通知） ------------------ */
 function ensureAlertStyles(){
   if (document.getElementById('toast-style-inject')) return;
   const st = document.createElement('style');
@@ -1183,4 +1137,3 @@ window.__ARB_DEBUG__ = {
   board: marketBoard,
   books: discoveredBooks
 };
-
