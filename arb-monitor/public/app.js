@@ -187,11 +187,32 @@ function buildStreamUrl() {
 
 /* ------------------ 统一连接入口 ------------------ */
 function connectStream(){
-  const url = buildStreamUrl();
-  if (/^https?:\/\//i.test(url)) {
-    connectSSE(url);
-  } else {
-    connectWS();
+  // 读取面板里的地址；http(s) 走 SSE，ws(s) 走 WebSocket；
+  // 相对路径兜底：/sse/* → SSE，/ws/* → WebSocket
+  try {
+    const url = buildStreamUrl(); // 已包含 token query
+
+    if (isHttpUrl(url)) {
+      connectSSE(url);
+      return;
+    }
+    if (isWsUrl(url)) {
+      connectWS();
+      return;
+    }
+    // 相对地址兜底
+    if (url && url.startsWith('/sse/')) {
+      connectSSE(`${location.origin}${url}`);
+    } else if (url && url.startsWith('/ws/')) {
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      connectWS(`${proto}://${location.host}${url}`);
+    } else {
+      // 没填地址时：按当前站点 SSE 出口
+      connectSSE(`${location.origin}/sse/opps`);
+    }
+  } catch (e){
+    console.error('connectStream error:', e);
+    updateConnectionStatus('reconnecting');
   }
 }
 
@@ -1137,3 +1158,4 @@ window.__ARB_DEBUG__ = {
   board: marketBoard,
   books: discoveredBooks
 };
+
