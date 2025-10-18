@@ -1,6 +1,6 @@
 /* =======================================================
    arb-monitor — public/app.js
-   生产版（SSE 优先；强制港赔；半场/全场标识；兼容更多格式）
+   生产版（SSE 优先；强制港赔；半场/全场并存；兼容更多格式）
    ======================================================= */
 'use strict';
 
@@ -17,7 +17,18 @@ let lastHeartbeat = 0;
 let heartbeatTimer = null;
 
 let settings = {};
-let marketBoard = new Map();       // eventKey -> {league, home, away, score, books:Set, ouMap:Map, ahMap:Map, updatedAt, kickoffAt}
+/**
+ * marketBoard: Map<eventKey, {
+ *   league, home, away, score,
+ *   books: Set<book>,              // 只记录书商集合，用于过滤与面板
+ *   ouMap: Map<book|period, OU>,   // ✅ 关键：book + period(FT/HT) 作为键，避免互相覆盖
+ *   ahMap: Map<book|period, AH>,   // ✅ 同上
+ *   updatedAt, kickoffAt
+ * }>
+ *   OU: { book, period, line, over, under }
+ *   AH: { book, period, line, home, away }
+ */
+let marketBoard = new Map();
 let hasUserInteracted = false;
 let discoveredBooks = new Set();   // 动态发现书商
 
@@ -29,7 +40,7 @@ const ALERT_TTL_MS = 15000;    // 软去重窗口：15s
 
 // 排序 & 稳定行序（用于行情总览，不影响套利表）
 let sortMode = 'time'; // 'time' | 'league'
-const rowOrder = new Map(); // key: eventKey|book -> stable index
+const rowOrder = new Map(); // key: eventKey|book|period -> stable index
 let rowSeq = 0;
 
 // —— 强制港赔开关（本版：始终按 hk→欧赔）
@@ -67,7 +78,7 @@ function connectMock(){
 /* >>>>>>>>>>>>>>>>>>>>>  本地模拟结束  <<<<<<<<<<<<<<<<<<<<<< */
 
 /* ------------------ 常用函数 ------------------ */
-function rowKey(eventKey, book) { return `${eventKey}|${(book||'').toLowerCase()}`; }
+function rowKey(eventKey, book, period) { return `${eventKey}|${(book||'').toLowerCase()}|${period||'FT'}`; }
 
 /* 只把“像时间戳”的值当时间，避免把“第X分钟(40/77等)”误判 */
 function guessKickoffTs(obj) {
@@ -96,16 +107,10 @@ function zhSel(sel){
     default: return sel;
   }
 }
-// 只用于显示：把赔率四舍五入为 2 位小数（null/undefined/NaN 显示为 '-')
-function fmtOdd(o, digits = 2) {
-  const n = Number(o);
-  if (!Number.isFinite(n)) return '-';
-  return n.toFixed(digits);
-}
+function fmtOdd(o, digits = 2) { const n = Number(o); return Number.isFinite(n) ? n.toFixed(digits) : '-'; }
 
 /* ------------------ 默认设置 ------------------ */
 const DEFAULT_SETTINGS = {
-  // 这里把数据源默认成“自定义 + SSE 地址”；如需 WS，可在面板改成 ws:// 或 wss://
   datasource: { wsMode:'custom', wsUrl:'https://www.youdatan.com/sse/opps', token:'', mockEnabled:false },
   books: {},
   rebates: {},
@@ -158,7 +163,6 @@ function clearDiscoveredBooks(){ discoveredBooks.clear(); renderBookList(); rend
 function getEventKey(opp){
   const id = opp?.event_id ?? opp?.eventId ?? opp?.match_id ?? opp?.id;
   if (id != null && String(id).trim() !== '') return String(id);
-  // 兜底：尝试用主客队拼 event_name；仍不可用时，再退回联赛|赛事
   const h = (opp?.home || '').trim();
   const a = (opp?.away || '').trim();
   const name = (opp?.event_name && opp.event_name.trim())
@@ -169,7 +173,6 @@ function getEventKey(opp){
 
 /* ------------------ 半场/全场识别 ------------------ */
 function detectPeriod(raw, marketRaw){
-  // 返回 'HT' 上半场；默认 'FT' 全场
   const bucket = [
     raw?.period, raw?.scope, raw?.market_scope, raw?.bet_scope,
     raw?.half, raw?.stage, raw?.time_type, raw?.period_type,
@@ -184,11 +187,9 @@ function zhPeriod(p){ return p==='HT' ? '上半' : '全场'; }
 
 /* ------------------ 构造流地址（SSE/WS 共用） ------------------ */
 function buildStreamUrl() {
-  // 自定义优先，否则 fallback 当前站点 /sse/opps
   let base = (settings.datasource?.wsMode === 'custom' && (settings.datasource?.wsUrl || '').trim())
     ? settings.datasource.wsUrl.trim()
     : (location.protocol === 'https:' ? 'https://' : 'http://') + location.host + '/sse/opps';
-
   const url = new URL(base);
   const token = (settings.datasource?.token || '').trim();
   if (token) url.searchParams.set('token', token); // SSE 无 header，这里用 query 透传
@@ -197,27 +198,16 @@ function buildStreamUrl() {
 
 /* ------------------ 统一连接入口 ------------------ */
 function connectStream(){
-  // 读取面板里的地址；http(s) 走 SSE，ws(s) 走 WebSocket；
-  // 相对路径兜底：/sse/* → SSE，/ws/* → WebSocket
   try {
-    const url = buildStreamUrl(); // 已包含 token query
-
-    if (isHttpUrl(url)) {
-      connectSSE(url);
-      return;
-    }
-    if (isWsUrl(url)) {
-      connectWS();
-      return;
-    }
-    // 相对地址兜底
+    const url = buildStreamUrl();
+    if (isHttpUrl(url)) return connectSSE(url);
+    if (isWsUrl(url))   return connectWS();
     if (url && url.startsWith('/sse/')) {
       connectSSE(`${location.origin}${url}`);
     } else if (url && url.startsWith('/ws/')) {
       const proto = location.protocol === 'https:' ? 'wss' : 'ws';
       connectWS(`${proto}://${location.host}${url}`);
     } else {
-      // 没填地址时：按当前站点 SSE 出口
       connectSSE(`${location.origin}/sse/opps`);
     }
   } catch (e){
@@ -231,9 +221,7 @@ function isHttpUrl(u){ return /^https?:\/\//i.test(String(u||'')); }
 function isWsUrl(u){  return /^wss?:\/\//i.test(String(u||'')); }
 
 function connectWS(){
-  if (settings.datasource?.mockEnabled){
-    stopMock(); connectMock(); return;
-  }
+  if (settings.datasource?.mockEnabled){ stopMock(); connectMock(); return; }
   stopMock();
 
   const isAliveWS = ws && (ws.readyState===WebSocket.CONNECTING || ws.readyState===WebSocket.OPEN);
@@ -271,7 +259,6 @@ function connectWS(){
         if (typeof ev.data === 'string') text = ev.data;
         else if (ev.data instanceof Blob && typeof ev.data.text === 'function') text = await ev.data.text();
         else text = String(ev.data);
-
         const obj = JSON.parse(text);
         __norm.parsed++;
         handleUnifiedMessage(obj);
@@ -305,9 +292,7 @@ function connectSSE(url){
       stopHeartbeatMonitor(); // SSE 无需浏览器心跳
     });
 
-    const pass = (e) => {
-      try { handleUnifiedMessage(JSON.parse(e.data)); } catch(_){}
-    };
+    const pass = (e) => { try { handleUnifiedMessage(JSON.parse(e.data)); } catch(_){} };
     es.addEventListener('message', pass);
     ['heartbeat','snapshot','opportunity'].forEach(evt=> es.addEventListener(evt, pass));
 
@@ -340,7 +325,6 @@ function scheduleReconnect(){
   const d = Math.min(30000, Math.pow(2, wsReconnectAttempts-1)*1000);
   wsReconnectTimer = setTimeout(connectStream, d);
 }
-// 仅 WS 需要心跳
 function startHeartbeatMonitor(){
   stopHeartbeatMonitor();
   heartbeatTimer = setInterval(()=>{
@@ -382,6 +366,12 @@ function _normMarket(rawMkt, pickA, pickB){
   const sb=(pickB?.selection||'').toLowerCase();
   if (_OVER_ALIASES.has(sa) || _UNDER_ALIASES.has(sa) || _OVER_ALIASES.has(sb) || _UNDER_ALIASES.has(sb)) return 'ou';
   if (_HOME_ALIASES.has(sa) || _AWAY_ALIASES.has(sa) || _HOME_ALIASES.has(sb) || _AWAY_ALIASES.has(sb)) return 'ah';
+  return 'ou';
+}
+function _marketFromType(t){
+  const n = String(t||'').trim();
+  if (n==='2' || n.toLowerCase()==='ou') return 'ou';
+  if (n==='6' || n.toLowerCase()==='ah') return 'ah';
   return 'ou';
 }
 
@@ -457,12 +447,6 @@ function _normalizeOpp(raw){
     kickoffAt:_pick(raw,['kickoffAt','kickoff_at','kickoff','matchTime','match_time','start_time','start_ts','startTime'],undefined)
   };
 }
-function _marketFromType(t){
-  const n = String(t||'').trim();
-  if (n==='2' || n.toLowerCase()==='ou') return 'ou';
-  if (n==='6' || n.toLowerCase()==='ah') return 'ah';
-  return 'ou';
-}
 
 /** —— 统一消息：snapshot/opportunity/heartbeat */
 function _normalizeMessage(message){
@@ -519,30 +503,40 @@ function processOpportunity(opp, shouldAlert){
 function ensureEventContainer(key){
   const cur = marketBoard.get(key);
   if (cur) return cur;
-  const obj = { league:'', home:'', away:'', score:'', books:new Set(), ouMap:new Map(), ahMap:new Map(), updatedAt:0, kickoffAt:undefined };
+  const obj = {
+    league:'', home:'', away:'', score:'',
+    books:new Set(),                    // 书商集合（只存 book，不带 period）
+    ouMap:new Map(),                    // key: `${book}|${period}`  → { book, period, line, over, under }
+    ahMap:new Map(),                    // key: `${book}|${period}`  → { book, period, line, home, away }
+    updatedAt:0, kickoffAt:undefined
+  };
   marketBoard.set(key, obj); return obj;
 }
 function setOUForBook(cur, book, line, selection, odds, period){
   if (book==null) return;
   const b = normBookKey(String(book));
-  const entry = cur.ouMap.get(b) || { line:'', over:null, under:null, period:'FT' };
+  const pd = (period==='HT'?'HT':'FT');
+  const key = `${b}|${pd}`;
+  const entry = cur.ouMap.get(key) || { book:b, period:pd, line:'', over:null, under:null };
   entry.line = line || entry.line || '';
-  entry.period = period || entry.period || 'FT';
   const sel = (selection||'').toLowerCase();
-  if (sel==='over') entry.over = odds;
+  if (sel==='over')  entry.over  = odds;
   if (sel==='under') entry.under = odds;
-  cur.ouMap.set(b, entry); cur.books.add(b); addDiscoveredBook(b);
+  cur.ouMap.set(key, entry);
+  cur.books.add(b); addDiscoveredBook(b);
 }
 function setAHForBook(cur, book, line, selection, odds, period){
   if (book==null) return;
   const b = normBookKey(String(book));
-  const entry = cur.ahMap.get(b) || { line:'', home:null, away:null, period:'FT' };
+  const pd = (period==='HT'?'HT':'FT');
+  const key = `${b}|${pd}`;
+  const entry = cur.ahMap.get(key) || { book:b, period:pd, line:'', home:null, away:null };
   entry.line = line || entry.line || '';
-  entry.period = period || entry.period || 'FT';
   const sel = (selection||'').toLowerCase();
   if (sel==='home') entry.home = odds;
   if (sel==='away') entry.away = odds;
-  cur.ahMap.set(b, entry); cur.books.add(b); addDiscoveredBook(b);
+  cur.ahMap.set(key, entry);
+  cur.books.add(b); addDiscoveredBook(b);
 }
 function updateMarketBoard(opp){
   const key = getEventKey(opp);
@@ -737,31 +731,31 @@ function createArbitrageRow(result){
   return row;
 }
 
-/* ------------------ 批量重算（保持不动） ------------------ */
+/* ------------------ 批量重算（保持不动，但限定同 period 配对） ------------------ */
 function recalculateAllArbitrageOpportunities(){
   const tbody = findArbTbody(); if (!tbody) return;
   clearArbitrageTable();
   marketBoard.forEach((data,eventId)=>{
-    const ouEntries=Array.from(data.ouMap.entries());
-    for (const [bOver,eOver] of ouEntries){
-      for (const [bUnder,eUnder] of ouEntries){
-        if (bOver===bUnder) continue;
-        if (eOver?.over && eUnder?.under){
+    const ouEntries=Array.from(data.ouMap.values());
+    for (const eOver of ouEntries){
+      for (const eUnder of ouEntries){
+        if (eOver.book===eUnder.book) continue;
+        if ((eOver?.over && eUnder?.under) && eOver.period===eUnder.period){
           const opp={ event_id:eventId, event_name:`${data.home} vs ${data.away}`, league:data.league, period:eOver.period||'FT', market:'ou',
             line_text:eOver.line||eUnder.line||'', line_numeric:parseFloat(eOver.line||eUnder.line)||0,
-            pickA:{book:bOver,selection:'over',odds:eOver.over}, pickB:{book:bUnder,selection:'under',odds:eUnder.under}, score:data.score };
+            pickA:{book:eOver.book,selection:'over',odds:eOver.over}, pickB:{book:eUnder.book,selection:'under',odds:eUnder.under}, score:data.score };
           const r=calculateArbitrage(opp); if (r) addArbitrageOpportunity(r,false);
         }
       }
     }
-    const ahEntries=Array.from(data.ahMap.entries());
-    for (const [bHome,eHome] of ahEntries){
-      for (const [bAway,eAway] of ahEntries){
-        if (bHome===bAway) continue;
-        if (eHome?.home && eAway?.away){
+    const ahEntries=Array.from(data.ahMap.values());
+    for (const eHome of ahEntries){
+      for (const eAway of ahEntries){
+        if (eHome.book===eAway.book) continue;
+        if ((eHome?.home && eAway?.away) && eHome.period===eAway.period){
           const opp={ event_id:eventId, event_name:`${data.home} vs ${data.away}`, league:data.league, period:eHome.period||'FT', market:'ah',
             line_text:eHome.line||eAway.line||'', line_numeric:parseFloat(eHome.line||eAway.line)||0,
-            pickA:{book:bHome,selection:'home',odds:eHome.home}, pickB:{book:bAway,selection:'away',odds:eAway.away}, score:data.score };
+            pickA:{book:eHome.book,selection:'home',odds:eHome.home}, pickB:{book:eAway.book,selection:'away',odds:eAway.away}, score:data.score };
           const r=calculateArbitrage(opp); if (r) addArbitrageOpportunity(r,false);
         }
       }
@@ -908,39 +902,52 @@ function findArbTbody(){
   return document.querySelector('#arbitrageTable tbody') || document.querySelectorAll('tbody')[1] || findMarketTbody();
 }
 
-/* ------------------ 行情总览 ------------------ */
+/* ------------------ 行情总览（按 book+period 分组渲染） ------------------ */
 function renderMarketBoard(){
   const tbody = findMarketTbody(); if (!tbody) return;
   tbody.innerHTML='';
   if (marketBoard.size===0){ tbody.innerHTML='<tr class="no-data"><td colspan="8">暂无数据</td></tr>'; return; }
 
-  // 允许“未勾选任何书商”时也展示全部（不依赖 discoveredBooks）
   const enabledList = Array.from(discoveredBooks).filter(b => settings.books[b] !== false).map(b => normBookKey(b));
   const enabled = new Set(enabledList);
-  const useAll = enabled.size === 0; // 不再依赖 discoveredBooks.size
+  const useAll = enabled.size === 0;
+
   const rows=[];
   for (const [eventId, data] of marketBoard.entries()) {
-    const pool = Array.from(data.books || []);
-    const enabledBooks = useAll ? pool : pool.filter(b => enabled.has(normBookKey(b)));
-    if (enabledBooks.length === 0) continue;
-    enabledBooks.forEach(book => {
-      const rk = rowKey(eventId, book); if (!rowOrder.has(rk)) rowOrder.set(rk, ++rowSeq);
-      const ouE = data.ouMap.get(book), ahE = data.ahMap.get(book);
-      const ouTxt = ouE ? `[${zhPeriod(ouE.period || 'FT')}] ${ouE.line || ''} (${fmtOdd(ouE.over)} / ${fmtOdd(ouE.under)})` : '-';
-      const ahTxt = ahE ? `[${zhPeriod(ahE.period || 'FT')}] ${ahE.line || ''} (${fmtOdd(ahE.home)} / ${fmtOdd(ahE.away)})` : '-';
+
+    // 按 (book,period) 分组的合并视图：同一行包含同 period 的 OU 与 AH
+    const groups = new Map(); // key: `${book}|${period}` -> { book, period, ou?, ah? }
+
+    for (const e of data.ouMap.values()){
+      if (!useAll && !enabled.has(e.book)) continue;
+      const k = `${e.book}|${e.period}`;
+      const g = groups.get(k) || { book:e.book, period:e.period, ou:null, ah:null };
+      g.ou = e; groups.set(k,g);
+    }
+    for (const e of data.ahMap.values()){
+      if (!useAll && !enabled.has(e.book)) continue;
+      const k = `${e.book}|${e.period}`;
+      const g = groups.get(k) || { book:e.book, period:e.period, ou:null, ah:null };
+      g.ah = e; groups.set(k,g);
+    }
+
+    for (const g of groups.values()){
+      const rk = rowKey(eventId, g.book, g.period);
+      if (!rowOrder.has(rk)) rowOrder.set(rk, ++rowSeq);
+
+      const ouTxt = g.ou ? `[${zhPeriod(g.period)}] ${g.ou.line || ''} (${fmtOdd(g.ou.over)} / ${fmtOdd(g.ou.under)})` : '-';
+      const ahTxt = g.ah ? `[${zhPeriod(g.period)}] ${g.ah.line || ''} (${fmtOdd(g.ah.home)} / ${fmtOdd(g.ah.away)})` : '-';
+
       rows.push({
-        rk, stable: rowOrder.get(rk), book, league: data.league || '', home: data.home || '', away: data.away || '', score: data.score || '',
+        rk, stable: rowOrder.get(rk),
+        book: g.book, period: g.period,
+        league: data.league || '', home: data.home || '', away: data.away || '', score: data.score || '',
         ouText: ouTxt, ahText: ahTxt, kickoffAt: data.kickoffAt || 0, updatedAt: data.updatedAt || 0
       });
-    });
+    }
   }
-  if (rows.length===0){ tbody.innerHTML='<tr class="no-data"><td colspan="8">暂无数据</td></tr>'; return; }
 
-  // 保障：若 rows 仍为空，给出占位
-  if (!rows.length){
-    tbody.innerHTML = '<tr class="no-data"><td colspan="8">暂无数据</td></tr>';
-    return;
-  }
+  if (rows.length===0){ tbody.innerHTML='<tr class="no-data"><td colspan="8">暂无数据</td></tr>'; return; }
 
   if (sortMode==='league'){
     rows.sort((a,b)=>{ const l=a.league.localeCompare(b.league); if(l)return l; const t=(a.kickoffAt||a.updatedAt)-(b.kickoffAt||b.updatedAt); if(t)return t; return a.stable-b.stable; });
@@ -1037,7 +1044,6 @@ function initDatasourcePanel(){
   else { wsModeAuto && (wsModeAuto.checked=true); wsUrlInput && (wsUrlInput.disabled=true); }
   wsUrlInput && (wsUrlInput.value=ds.wsUrl||''); wsTokenInput && (wsTokenInput.value=ds.token||'');
 
-  // 使用模拟数据开关：支持多种选择器
   const mockSwitch = document.querySelector('#use-mock, input[name="use-mock"], [data-mock], #mockSwitch, .mock-switch input[type="checkbox"]');
   if (mockSwitch){
     mockSwitch.disabled = false;
@@ -1060,7 +1066,6 @@ function initDatasourcePanel(){
 
     try{
       if (/^https?:/i.test(url)){
-        // 用 EventSource 测试 SSE
         const tmp = new EventSource(url);
         const to = setTimeout(()=>{ try{tmp.close();}catch(_){} finish(false,'连接超时'); },5000);
         tmp.addEventListener('open',()=>{ clearTimeout(to); try{tmp.close();}catch(_){} finish(true,'SSE 连接成功'); });
