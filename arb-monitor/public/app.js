@@ -155,7 +155,17 @@ function addDiscoveredBook(book){
 function clearDiscoveredBooks(){ discoveredBooks.clear(); renderBookList(); renderRebateSettings(); updateABookOptions(); }
 
 /* ------------------ 工具函数 ------------------ */
-function getEventKey(opp){ return `${opp.league || ''}|${opp.event_name || ''}`; }
+function getEventKey(opp){
+  const id = opp?.event_id ?? opp?.eventId ?? opp?.match_id ?? opp?.id;
+  if (id != null && String(id).trim() !== '') return String(id);
+  // 兜底：尝试用主客队拼 event_name；仍不可用时，再退回联赛|赛事
+  const h = (opp?.home || '').trim();
+  const a = (opp?.away || '').trim();
+  const name = (opp?.event_name && opp.event_name.trim())
+    ? opp.event_name.trim()
+    : (h && a ? `${h} vs ${a}` : '');
+  return `${opp?.league || ''}|${name}`;
+}
 
 /* ------------------ 半场/全场识别 ------------------ */
 function detectPeriod(raw, marketRaw){
@@ -539,12 +549,16 @@ function updateMarketBoard(opp){
   const cur = ensureEventContainer(key);
 
   if (opp.league) cur.league = opp.league;
-  if (opp.event_name) {
-    if (opp.home && opp.away){ cur.home=opp.home; cur.away=opp.away; }
-    else {
-      const [h,a]=(opp.event_name||'').split(' vs ').map(s=>s?.trim()||'');
-      if (h) cur.home=h; if (a) cur.away=a;
+  {
+    let h = (opp.home || '').trim();
+    let a = (opp.away || '').trim();
+    if ((!h || !a) && (opp.event_name || '').includes(' vs ')){
+      const sp = (opp.event_name || '').split(' vs ').map(s => s.trim());
+      if (!h && sp[0]) h = sp[0];
+      if (!a && sp[1]) a = sp[1];
     }
+    if (h) cur.home = h;
+    if (a) cur.away = a;
   }
   if (opp.score != null) cur.score = opp.score;
 
