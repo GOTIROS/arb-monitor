@@ -863,6 +863,7 @@ let _marketTbodyCache = null;
 function findMarketTbody(){
   if (_marketTbodyCache && document.body.contains(_marketTbodyCache)) return _marketTbodyCache;
   let el = document.querySelector('#marketTable tbody');
+  if (!el) el = document.querySelector('#market-board tbody') || document.querySelector('#board tbody');
   if (el) { _marketTbodyCache = el; return el; }
   const tables = Array.from(document.querySelectorAll('table'));
   for (const t of tables){
@@ -887,19 +888,23 @@ function renderMarketBoard(){
   tbody.innerHTML='';
   if (marketBoard.size===0){ tbody.innerHTML='<tr class="no-data"><td colspan="8">暂无数据</td></tr>'; return; }
 
-  const enabled = new Set(Array.from(discoveredBooks).filter(b => settings.books[b] !== false).map(b=>normBookKey(b)));
+  const enabled = new Set(Array.from(discoveredBooks).filter(b => settings.books[b] !== false).map(b => normBookKey(b)));
+  // 若用户未勾选任何书商，但已经动态发现到了书商，则默认展示全部书商（防止把数据全过滤掉）
+  const showAllWhenNoneSelected = enabled.size === 0 && discoveredBooks.size > 0;
   const rows=[];
-  for (const [eventId,data] of marketBoard.entries()){
-    const enabledBooks=[...data.books].filter(b => enabled.has(normBookKey(b)));
-    if (enabledBooks.length===0) continue;
-    enabledBooks.forEach(book=>{
-      const rk=rowKey(eventId,book); if (!rowOrder.has(rk)) rowOrder.set(rk,++rowSeq);
-      const ouE=data.ouMap.get(book), ahE=data.ahMap.get(book);
-      const ouTxt = ouE ? `[${zhPeriod(ouE.period||'FT')}] ${ouE.line || ''} (${fmtOdd(ouE.over)} / ${fmtOdd(ouE.under)})` : '-';
-      const ahTxt = ahE ? `[${zhPeriod(ahE.period||'FT')}] ${ahE.line || ''} (${fmtOdd(ahE.home)} / ${fmtOdd(ahE.away)})` : '-';
+  for (const [eventId, data] of marketBoard.entries()) {
+    const enabledBooks = showAllWhenNoneSelected
+      ? [...data.books]
+      : [...data.books].filter(b => enabled.has(normBookKey(b)));
+    if (enabledBooks.length === 0) continue;
+    enabledBooks.forEach(book => {
+      const rk = rowKey(eventId, book); if (!rowOrder.has(rk)) rowOrder.set(rk, ++rowSeq);
+      const ouE = data.ouMap.get(book), ahE = data.ahMap.get(book);
+      const ouTxt = ouE ? `[${zhPeriod(ouE.period || 'FT')}] ${ouE.line || ''} (${fmtOdd(ouE.over)} / ${fmtOdd(ouE.under)})` : '-';
+      const ahTxt = ahE ? `[${zhPeriod(ahE.period || 'FT')}] ${ahE.line || ''} (${fmtOdd(ahE.home)} / ${fmtOdd(ahE.away)})` : '-';
       rows.push({
-        rk, stable:rowOrder.get(rk), book, league:data.league||'', home:data.home||'', away:data.away||'', score:data.score||'',
-        ouText: ouTxt, ahText: ahTxt, kickoffAt:data.kickoffAt||0, updatedAt:data.updatedAt||0
+        rk, stable: rowOrder.get(rk), book, league: data.league || '', home: data.home || '', away: data.away || '', score: data.score || '',
+        ouText: ouTxt, ahText: ahTxt, kickoffAt: data.kickoffAt || 0, updatedAt: data.updatedAt || 0
       });
     });
   }
@@ -1158,4 +1163,3 @@ window.__ARB_DEBUG__ = {
   board: marketBoard,
   books: discoveredBooks
 };
-
