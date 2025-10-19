@@ -451,23 +451,56 @@ function _normalizeOpp(raw){
 /** —— 统一消息：snapshot/opportunity/heartbeat */
 function _normalizeMessage(message){
   if (!message) return null;
-  if (Array.isArray(message)) { __norm.lastType='array'; return { type:'snapshot', data:message.map(_normalizeOpp).filter(Boolean), ts:Date.now() }; }
-  let type = _str(message.type).toLowerCase(); const ts=message.ts||Date.now();
-  if (!type || type==='ping' || type==='hello') { __norm.lastType='heartbeat'; return { type:'heartbeat', ts }; }
-  if (type==='heartbeat') { __norm.lastType='heartbeat'; return { type:'heartbeat', ts }; }
-  if (['snapshot','full','list','opportunity_batch','batch'].includes(type)){
-    __norm.lastType='snapshot';
-    const list=_pick(message,['data','opps','items','list'],[]);
-    return { type:'snapshot', data:(Array.isArray(list)?list.map(_normalizeOpp).filter(Boolean):[]), ts };
+
+  // 纯数组：直接当作 snapshot
+  if (Array.isArray(message)) {
+    __norm.lastType = 'snapshot';
+    return { type: 'snapshot', data: message.map(_normalizeOpp).filter(Boolean), ts: Date.now() };
   }
-  if (['opportunity','delta','change','upd','update'].includes(type)){
-    __norm.lastType='opportunity';
-    const raw=_pick(message,['data','opp','item','record'],null);
-    const opp=_normalizeOpp(raw); if (!opp) return { type:'heartbeat', ts };
-    return { type:'opportunity', data:opp, ts };
+
+  let type = _str(message.type).toLowerCase();
+  const ts = message.ts || Date.now();
+
+  // 心跳 / hello
+  if (!type || type === 'ping' || type === 'hello') {
+    __norm.lastType = 'heartbeat';
+    return { type: 'heartbeat', ts };
   }
-  const list=_pick(message,['data','opps','items','list'],null);
-  if (Array.isArray(list)) { __norm.lastType='snapshot'; return { type:'snapshot', data:list.map(_normalizeOpp).filter(Boolean), ts }; }
+  if (type === 'heartbeat') {
+    __norm.lastType = 'heartbeat';
+    return { type: 'heartbeat', ts };
+  }
+
+  // 兼容：opportunity 携带 batch（服务端以 `event: opportunity` 推送一批）
+  if (type === 'opportunity' && Array.isArray(message.batch)) {
+    __norm.lastType = 'snapshot';
+    const list = message.batch || [];
+    return { type: 'snapshot', data: list.map(_normalizeOpp).filter(Boolean), ts };
+  }
+
+  // 兼容：各种“批量”快照类型
+  if (['snapshot', 'full', 'list', 'opportunity_batch', 'batch'].includes(type)) {
+    __norm.lastType = 'snapshot';
+    const list = _pick(message, ['data', 'opps', 'items', 'list', 'batch'], []);
+    return { type: 'snapshot', data: (Array.isArray(list) ? list.map(_normalizeOpp).filter(Boolean) : []), ts };
+  }
+
+  // 单条机会
+  if (['opportunity', 'delta', 'change', 'upd', 'update'].includes(type)) {
+    __norm.lastType = 'opportunity';
+    const raw = _pick(message, ['data', 'opp', 'item', 'record'], null);
+    const opp = _normalizeOpp(raw);
+    if (!opp) return { type: 'heartbeat', ts };
+    return { type: 'opportunity', data: opp, ts };
+  }
+
+  // 兜底：如果包含数组字段也按 snapshot 处理
+  const list = _pick(message, ['data', 'opps', 'items', 'list', 'batch'], null);
+  if (Array.isArray(list)) {
+    __norm.lastType = 'snapshot';
+    return { type: 'snapshot', data: list.map(_normalizeOpp).filter(Boolean), ts };
+  }
+
   return null;
 }
 function handleUnifiedMessage(message){
