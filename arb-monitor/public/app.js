@@ -111,7 +111,7 @@ function fmtOdd(o, digits = 2) { const n = Number(o); return Number.isFinite(n) 
 
 /* ------------------ 默认设置 ------------------ */
 const DEFAULT_SETTINGS = {
-  datasource: { wsMode:'custom', wsUrl:'https://www.youdatan.com/sse/opps', token:'', mockEnabled:false },
+  datasource: { wsMode:'custom', wsUrl:'https://stream.youdatan.com/sse/opps', token:'', mockEnabled:false },
   books: {},
   rebates: {},
   rebateA: { book:'', rate:0 },
@@ -294,7 +294,7 @@ function connectSSE(url){
 
     const pass = (e) => { try { handleUnifiedMessage(JSON.parse(e.data)); } catch(_){} };
     es.addEventListener('message', pass);
-    ['heartbeat','snapshot','opportunity'].forEach(evt=> es.addEventListener(evt, pass));
+    ['heartbeat','snapshot','opportunity','opportunity_batch'].forEach(evt=> es.addEventListener(evt, pass));
 
     es.addEventListener('error', (e) => {
       console.warn('SSE 错误/断开，准备重连', e);
@@ -455,7 +455,7 @@ function _normalizeMessage(message){
   let type = _str(message.type).toLowerCase(); const ts=message.ts||Date.now();
   if (!type || type==='ping' || type==='hello') { __norm.lastType='heartbeat'; return { type:'heartbeat', ts }; }
   if (type==='heartbeat') { __norm.lastType='heartbeat'; return { type:'heartbeat', ts }; }
-  if (['snapshot','full','list'].includes(type)){
+  if (['snapshot','full','list','opportunity_batch','batch'].includes(type)){
     __norm.lastType='snapshot';
     const list=_pick(message,['data','opps','items','list'],[]);
     return { type:'snapshot', data:(Array.isArray(list)?list.map(_normalizeOpp).filter(Boolean):[]), ts };
@@ -1200,4 +1200,3 @@ window.__ARB_DEBUG__ = {
   board: marketBoard,
   books: discoveredBooks
 };
-
