@@ -44,7 +44,7 @@ const rowOrder = new Map(); // key: eventKey|book|period -> stable index
 let rowSeq = 0;
 
 // —— 强制港赔开关（本版：始终按 hk→欧赔）
-const FORCE_HK_ODDS = true;
+const FORCE_HK_ODDS = false;
 
 /* >>>>>>>>>>>>>>>>>>>>>  本地模拟  <<<<<<<<<<<<<<<<<<<<<< */
 let mockTimers = [];
@@ -1200,3 +1200,4 @@ window.__ARB_DEBUG__ = {
   board: marketBoard,
   books: discoveredBooks
 };
+
