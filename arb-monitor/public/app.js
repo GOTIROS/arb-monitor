@@ -294,7 +294,7 @@ function connectSSE(url){
 
     const pass = (e) => { try { handleUnifiedMessage(JSON.parse(e.data)); } catch(_){} };
     es.addEventListener('message', pass);
-    ['heartbeat','snapshot','opportunity','opportunity_batch'].forEach(evt=> es.addEventListener(evt, pass));
+    ['heartbeat','snapshot','opportunity','opportunity_batch','offer','offer_batch'].forEach(evt => es.addEventListener(evt, pass));
 
     es.addEventListener('error', (e) => {
       console.warn('SSE 错误/断开，准备重连', e);
@@ -460,6 +460,9 @@ function _normalizeMessage(message){
 
   let type = _str(message.type).toLowerCase();
   const ts = message.ts || Date.now();
+  // 兼容后端 "offer" 命名：等价于单条机会；"offer_batch" 等价于快照
+  if (type === 'offers') type = 'offer_batch';
+  if (type === 'offer') type = 'opportunity';
 
   // 心跳 / hello
   if (!type || type === 'ping' || type === 'hello') {
@@ -472,21 +475,21 @@ function _normalizeMessage(message){
   }
 
   // 兼容：opportunity 携带 batch（服务端以 `event: opportunity` 推送一批）
-  if (type === 'opportunity' && Array.isArray(message.batch)) {
+  if ((type === 'opportunity') && Array.isArray(message.batch)) {
     __norm.lastType = 'snapshot';
     const list = message.batch || [];
     return { type: 'snapshot', data: list.map(_normalizeOpp).filter(Boolean), ts };
   }
 
   // 兼容：各种“批量”快照类型
-  if (['snapshot', 'full', 'list', 'opportunity_batch', 'batch'].includes(type)) {
+  if (['snapshot', 'full', 'list', 'opportunity_batch', 'offer_batch', 'batch'].includes(type)) {
     __norm.lastType = 'snapshot';
-    const list = _pick(message, ['data', 'opps', 'items', 'list', 'batch'], []);
+    const list = _pick(message, ['data', 'opps', 'items', 'list', 'batch', 'offers'], []);
     return { type: 'snapshot', data: (Array.isArray(list) ? list.map(_normalizeOpp).filter(Boolean) : []), ts };
   }
 
   // 单条机会
-  if (['opportunity', 'delta', 'change', 'upd', 'update'].includes(type)) {
+  if (['opportunity', 'delta', 'change', 'upd', 'update', 'offer'].includes(type)) {
     __norm.lastType = 'opportunity';
     const raw = _pick(message, ['data', 'opp', 'item', 'record'], null);
     const opp = _normalizeOpp(raw);
@@ -495,7 +498,7 @@ function _normalizeMessage(message){
   }
 
   // 兜底：如果包含数组字段也按 snapshot 处理
-  const list = _pick(message, ['data', 'opps', 'items', 'list', 'batch'], null);
+  const list = _pick(message, ['data', 'opps', 'items', 'list', 'batch', 'offers'], null);
   if (Array.isArray(list)) {
     __norm.lastType = 'snapshot';
     return { type: 'snapshot', data: list.map(_normalizeOpp).filter(Boolean), ts };
