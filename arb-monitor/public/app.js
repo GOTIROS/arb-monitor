@@ -1246,8 +1246,6 @@ window.__ARB_DEBUG__ = {
   stats: __norm,
   board: marketBoard,
   books: discoveredBooks,
-+ tapSSE: tapRawSSE,
-+ injectDemo
 };
 
 /* ============ 调试：直接旁路监听原始 SSE 事件（只读） ============ */
@@ -1299,4 +1297,5 @@ function injectDemo(){
   handleUnifiedMessage(demo);
   console.log('[DEMO] injected snapshot with 2 opps');
 }
+
 
