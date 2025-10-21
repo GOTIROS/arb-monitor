@@ -110,21 +110,20 @@ function zhSel(sel){
 function fmtOdd(o, digits = 2) { const n = Number(o); return Number.isFinite(n) ? n.toFixed(digits) : '-'; }
 
 /* ------------------ 默认设置 ------------------ */
+// 直接替换 app.js 里原有的 DEFAULT_SETTINGS 整段
 const DEFAULT_SETTINGS = {
   datasource: {
     wsMode: 'custom',
-    wsUrl: 'https://app.youdatan.com/sse/opps', // 走 Worker 反代
+    wsUrl: 'https://app.youdatan.com/sse/opps', // 走 app.youdatan.com 的 /sse/opps
     token: '',
-    mockEnabled: false,
+    mockEnabled: false
   },
-  // 其余保持不变…
-};
   books: {},
   rebates: {},
-  rebateA: { book:'', rate:0 },
-  rebateB: { book:'', rate:0 },
-  stake:  { aBook:'', amountA:10000, minProfit:0 },
-  notify: { systemEnabled:false, soundEnabled:true, toastEnabled:true, toastDurationS:5, autoHideRowS:30 }
+  rebateA: { book: '', rate: 0 },
+  rebateB: { book: '', rate: 0 },
+  stake:  { aBook: '', amountA: 10000, minProfit: 0 },
+  notify: { systemEnabled: false, soundEnabled: true, toastEnabled: true, toastDurationS: 5, autoHideRowS: 30 }
 };
 
 /* ------------------ 设置存取 ------------------ */
@@ -1304,6 +1303,7 @@ function injectDemo(){
   handleUnifiedMessage(demo);
   console.log('[DEMO] injected snapshot with 2 opps');
 }
+
 
 
 
