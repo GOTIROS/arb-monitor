@@ -111,7 +111,13 @@ function fmtOdd(o, digits = 2) { const n = Number(o); return Number.isFinite(n) 
 
 /* ------------------ 默认设置 ------------------ */
 const DEFAULT_SETTINGS = {
-  datasource: { wsMode:'custom', wsUrl:'https://sse.youdatan.com/sse/opps', token:'', mockEnabled:false },
+  datasource: {
+    wsMode: 'custom',
+    wsUrl: 'https://app.youdatan.com/sse/opps', // ← 走 Worker 的反代
+    token: '',
+    mockEnabled: false,
+  },
+};
   books: {},
   rebates: {},
   rebateA: { book:'', rate:0 },
@@ -1297,5 +1303,6 @@ function injectDemo(){
   handleUnifiedMessage(demo);
   console.log('[DEMO] injected snapshot with 2 opps');
 }
+
 
 
