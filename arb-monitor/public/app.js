@@ -1245,6 +1245,58 @@ window.__ARB_DEBUG__ = {
   recalc: recalculateAllArbitrageOpportunities,
   stats: __norm,
   board: marketBoard,
-  books: discoveredBooks
+  books: discoveredBooks,
++ tapSSE: tapRawSSE,
++ injectDemo
 };
+
+/* ============ 调试：直接旁路监听原始 SSE 事件（只读） ============ */
+function tapRawSSE(){
+  try{
+    const url = buildStreamUrl();
+    const s = new EventSource(url, { withCredentials:false });
+    const log = (label) => (e) => {
+      let payload;
+      try { payload = JSON.parse(e.data); } catch (_) { payload = e.data; }
+      console.log(`[RAW ${label}]`, payload);
+    };
+    s.addEventListener('open',   () => console.log('[RAW] open'));
+    s.addEventListener('error',  (e) => console.warn('[RAW] error', e));
+    s.addEventListener('message',log('message'));
+    ['heartbeat','snapshot','opportunity','opportunity_batch','offer','offer_batch']
+      .forEach(evt => s.addEventListener(evt, log(evt)));
+    return s; // 需要时你可以在控制台上 s.close() 关闭
+  }catch(e){
+    console.error('tapRawSSE error:', e);
+  }
+}
+
+/* ============ 调试：本地注入一条/一批业务消息，验证渲染链路 ============ */
+function injectDemo(){
+  const demo = {
+    type: 'snapshot',
+    data: [
+      {
+        event_id:'DEMO-OU-FT',
+        event_name:'Mock United vs Demo City',
+        league:'测试联赛',
+        market:'ou', period:'FT', line_text:'2.5',
+        pickA:{ book:'pinnacle', selection:'over',  odds:1.93 },
+        pickB:{ book:'188bet',   selection:'under', odds:1.93 },
+        score:'0:0'
+      },
+      {
+        event_id:'DEMO-AH-HT',
+        event_name:'Mock United vs Demo City',
+        league:'测试联赛',
+        market:'ah', period:'HT', line_text:'-0.5',
+        pickA:{ book:'pinnacle', selection:'home', odds:1.90 },
+        pickB:{ book:'188bet',   selection:'away', odds:1.95 },
+        score:'0:0'
+      }
+    ]
+  };
+  handleUnifiedMessage(demo);
+  console.log('[DEMO] injected snapshot with 2 opps');
+}
 
