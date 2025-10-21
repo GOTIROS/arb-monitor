@@ -113,11 +113,11 @@ function fmtOdd(o, digits = 2) { const n = Number(o); return Number.isFinite(n) 
 const DEFAULT_SETTINGS = {
   datasource: {
     wsMode: 'custom',
-    wsUrl: 'https://app.youdatan.com/sse/opps', // 走 app.youdatan.com 反代
+    wsUrl: 'https://app.youdatan.com/sse/opps', // 走 Worker 反代
     token: '',
     mockEnabled: false,
   },
-  // 其余保持不变 …
+  // 其余保持不变…
 };
   books: {},
   rebates: {},
@@ -1304,6 +1304,7 @@ function injectDemo(){
   handleUnifiedMessage(demo);
   console.log('[DEMO] injected snapshot with 2 opps');
 }
+
 
 
 
