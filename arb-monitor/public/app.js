@@ -417,12 +417,23 @@ function _normalizeOpp(raw){
 
   // —— 再兜底：picks 数组
   if ((!pickA || !pickB) && Array.isArray(raw.picks)){
-    const p1=raw.picks[0]||{}, p2=raw.picks[1]||{};
-    pickA={book:_str(p1.book||p1.bk||'bookA').toLowerCase(), selection:_normSel(p1.selection||p1.sel), odds:_num(p1.odds)};
-    pickB={book:_str(p2.book||p2.bk||'bookB').toLowerCase(), selection:_normSel(p2.selection||p2.sel), odds:_num(p2.odds)};
+    const p1 = raw.picks[0] || {}, p2 = raw.picks[1] || {};
+    pickA = { book:_str(p1.book||p1.bk||'bookA').toLowerCase(), selection:_normSel(p1.selection||p1.sel), odds:_num(p1.odds) };
+    pickB = { book:_str(p2.book||p2.bk||'bookB').toLowerCase(), selection:_normSel(p2.selection||p2.sel), odds:_num(p2.odds) };
   }
 
-  if (!pickA || !pickB) return null;
+  // —— 单边 offer 兜底（只给 pickA；用于行情面板展示，套利仍需 AB 双边）
+  if (!pickA && (raw.book != null || raw.company != null || raw.companyId != null)){
+    const bk = _str(_pick(raw, ['book','company','companyName','companyId','cid'], 'bookA')).toLowerCase();
+    const sel = _normSel(_pick(raw, ['selection','sel'], ''));
+    const od  = _num(_pick(raw, ['odds','o','price'], undefined));
+    if (sel && od != null){
+      pickA = { book: bk, selection: sel, odds: od };
+    }
+  }
+
+  // 只有在两边都缺失时才丢弃该记录
+  if (!pickA && !pickB) return null;
 
   // —— 港赔转欧赔（强制）
   if (pickA.odds != null) pickA.odds = _toDecimalOdds(pickA.odds);
