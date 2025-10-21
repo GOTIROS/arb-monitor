@@ -111,7 +111,7 @@ function fmtOdd(o, digits = 2) { const n = Number(o); return Number.isFinite(n) 
 
 /* ------------------ 默认设置 ------------------ */
 const DEFAULT_SETTINGS = {
-  datasource: { wsMode:'custom', wsUrl:'https://stream.youdatan.com/sse/opps', token:'', mockEnabled:false },
+  datasource: { wsMode:'custom', wsUrl:'https://sse.youdatan.com/sse/opps', token:'', mockEnabled:false },
   books: {},
   rebates: {},
   rebateA: { book:'', rate:0 },
@@ -1247,3 +1247,4 @@ window.__ARB_DEBUG__ = {
   board: marketBoard,
   books: discoveredBooks
 };
+
