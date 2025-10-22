@@ -298,9 +298,36 @@ function connectSSE(url){
       stopHeartbeatMonitor(); // SSE 无需浏览器心跳
     });
 
-    const pass = (e) => { try { handleUnifiedMessage(JSON.parse(e.data)); } catch(_){} };
-    es.addEventListener('message', pass);
-    ['heartbeat','snapshot','opportunity','opportunity_batch','offer','offer_batch'].forEach(evt => es.addEventListener(evt, pass));
+    // 将 SSE 事件名注入到 payload（当 data 里没有 type 字段时）
+    const passWith = (evtName) => (e) => {
+      try {
+        const payload = JSON.parse(e.data);
+
+        // 1) 纯数组 -> 按该事件看作 batch
+        if (Array.isArray(payload)) {
+          handleUnifiedMessage({ type: evtName, data: payload, ts: Date.now() });
+          return;
+        }
+
+        // 2) 对象：若没有 type，则补上当前事件名
+        if (payload && typeof payload === 'object' && !payload.type) {
+          payload.type = evtName;
+        }
+        handleUnifiedMessage(payload);
+      } catch (_) {
+        // 非 JSON 的容错：依旧以事件名转发
+        handleUnifiedMessage({ type: evtName, data: e.data, ts: Date.now() });
+      }
+    };
+
+    // 默认 channel：里面通常自带 type，保持原样
+    es.addEventListener('message', (e) => {
+      try { handleUnifiedMessage(JSON.parse(e.data)); } catch(_){}
+    });
+
+    // 显式的事件：确保无 type 时也会被识别
+    ['heartbeat','snapshot','opportunity','opportunity_batch','offer','offer_batch']
+      .forEach(evt => es.addEventListener(evt, passWith(evt)));
 
     es.addEventListener('error', (e) => {
       console.warn('SSE 错误/断开，准备重连', e);
@@ -1303,7 +1330,6 @@ function injectDemo(){
   handleUnifiedMessage(demo);
   console.log('[DEMO] injected snapshot with 2 opps');
 }
-
 
 
 
