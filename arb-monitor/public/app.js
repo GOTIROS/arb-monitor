@@ -469,9 +469,10 @@ function _normalizeOpp(raw){
   if (!pickA && !pickB) return null;
 
   // —— 港赔转欧赔（强制）
-  if (pickA.odds != null) pickA.odds = _toDecimalOdds(pickA.odds);
-  if (pickB.odds != null) pickB.odds = _toDecimalOdds(pickB.odds);
-  if (!((pickA.odds||0) > 0 && (pickB.odds||0) > 0)) return null;
+  if (pickA && pickA.odds != null) pickA.odds = _toDecimalOdds(pickA.odds);
+  if (pickB && pickB.odds != null) pickB.odds = _toDecimalOdds(pickB.odds);
+  // 接受“单边 offer”：只要任意一侧有正赔率即可；两侧都没赔率才丢弃
+  if (!(((pickA && (pickA.odds||0) > 0) || (pickB && (pickB.odds||0) > 0)))) return null;
 
   // —— 市场 & 半场
   const marketRaw=_pick(raw,['market','market_type','mkt','type','玩法'],'');
@@ -482,12 +483,16 @@ function _normalizeOpp(raw){
   const period = detectPeriod(raw, marketRaw); // 'HT' 上半；默认 'FT'
   const eventId=_pick(raw,['event_id','eventId','match_id','fid','mid','id'], `${home}-${away}-${lineText}`);
 
+  // 安全构造 pickA / pickB（允许缺省其一）
+  const pA = pickA ? { book:String(pickA.book||'bookA').toLowerCase(), selection:_normSel(pickA.selection), odds:+pickA.odds } : null;
+  const pB = pickB ? { book:String(pickB.book||'bookB').toLowerCase(), selection:_normSel(pickB.selection), odds:+pickB.odds } : null;
+
   return {
     event_id:eventId, event_name:eventName, league, period,
     score:_str(_pick(raw,['score','sc','比分'],'')),
     market, line_text: lineText || (lineNum!=null?String(lineNum):''), line_numeric:(lineNum!=null?lineNum:undefined),
-    pickA:{ book:String(pickA.book||'bookA').toLowerCase(), selection:_normSel(pickA.selection), odds:+pickA.odds },
-    pickB:{ book:String(pickB.book||'bookB').toLowerCase(), selection:_normSel(pickB.selection), odds:+pickB.odds },
+    pickA: pA,  // 允许为 null；后续渲染会做存在性判断
+    pickB: pB,
     kickoffAt:_pick(raw,['kickoffAt','kickoff_at','kickoff','matchTime','match_time','start_time','start_ts','startTime'],undefined)
   };
 }
