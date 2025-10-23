@@ -1168,6 +1168,53 @@ function initDatasourcePanel(){
 function showReconnectButton(){ const b=document.getElementById('reconnect-now'); if (b) b.style.display='block'; }
 function hideReconnectButton(){ const b=document.getElementById('reconnect-now'); if (b) b.style.display='none'; }
 
+// 折叠设置抽屉（helper）
+function collapseSettingsDrawer() {
+  const drawer = document.querySelector('#drawer, [data-drawer], .drawer');
+  const overlay = document.getElementById('drawerOverlay');
+  if (drawer) drawer.classList.remove('active');
+  if (overlay) {
+    overlay.classList.remove('active');
+    overlay.style.pointerEvents = 'none';
+  }
+  document.body.style.overflow = '';
+}
+
+// 注入设置面板顶部工具栏
+function injectSettingsToolbar() {
+  const drawer = document.querySelector('#drawer, [data-drawer], .drawer');
+  if (!drawer) return;
+  if (drawer.querySelector('#settings-toolbar')) return; // 已注入
+
+  const toolbar = document.createElement('div');
+  toolbar.id = 'settings-toolbar';
+  toolbar.style.cssText = 'display:flex;justify-content:space-between;gap:8px;padding:10px 12px;position:sticky;top:0;background:rgba(20,22,28,.9);z-index:10;backdrop-filter:blur(4px);';
+
+  // 应用按钮
+  const applyBtn = document.createElement('button');
+  applyBtn.id = 'apply-settings';
+  applyBtn.textContent = '应用并生效';
+  applyBtn.style.cssText = 'padding:6px 18px;background:#2563eb;color:#fff;border:none;border-radius:6px;cursor:pointer;font-weight:600;';
+  applyBtn.onclick = function() {
+    saveSettings();
+    reconnectNow();
+    showToast('配置已应用', '连接已重新建立', 'success');
+  };
+
+  // 折叠按钮
+  const collapseBtn = document.createElement('button');
+  collapseBtn.id = 'collapse-settings';
+  collapseBtn.textContent = '折叠设置';
+  collapseBtn.style.cssText = 'padding:6px 18px;background:transparent;color:#cbd5e1;border:1px solid #334155;border-radius:6px;cursor:pointer;';
+  collapseBtn.onclick = function() {
+    collapseSettingsDrawer();
+  };
+
+  toolbar.appendChild(applyBtn);
+  toolbar.appendChild(collapseBtn);
+  drawer.insertBefore(toolbar, drawer.firstChild);
+}
+
 /* 市场控制面板、汉堡、通知、状态…（保持原实现） */
 function updateStakeInputs(){ const s=settings.stake||{}; const amountAInput=document.getElementById('amount-a'); const minProfitInput=document.getElementById('min-profit'); if (amountAInput) amountAInput.value=s.amountA||10000; if (minProfitInput) minProfitInput.value=s.minProfit||0; updateABookOptions(); }
 function updateNotifyInputs(){
@@ -1185,6 +1232,8 @@ function initHamburgerMenu(){
 
   function openDrawer(){ drawer.classList.add('active'); overlay.classList.add('active'); overlay.style.pointerEvents='auto'; document.body.style.overflow='hidden'; }
   function closeDrawer(){ drawer.classList.remove('active'); overlay.classList.remove('active'); overlay.style.pointerEvents='none'; document.body.style.overflow=''; }
+  // 允许外部调用 collapseSettingsDrawer
+  window.__collapseSettingsDrawer = closeDrawer;
   btn.addEventListener('click',(e)=>{ e.preventDefault(); e.stopPropagation(); openDrawer(); });
   overlay.addEventListener('click',(e)=>{ e.preventDefault(); closeDrawer(); });
   document.addEventListener('keydown',(e)=>{ if (e.key==='Escape') closeDrawer(); });
@@ -1258,6 +1307,9 @@ function initUI(loaded){
     requestNotificationPermission();
     updateConnectionStatus('connecting');
 
+    // 注入设置面板顶部工具栏
+    injectSettingsToolbar();
+
     const onceClick = () => {
       hasUserInteracted = true;
       if (pendingBeeps > 0){
@@ -1268,8 +1320,13 @@ function initUI(loaded){
     };
     document.addEventListener('click', onceClick, { once:true, capture:true });
 
+    // 更安全的 focus 监听，不触发重连当 SSE 已连接
     window.addEventListener('focus', () => {
-      try { if (!ws || ws.readyState !== WebSocket.OPEN) reconnectNow(); } catch(_){}
+      try {
+        const sseOk = es && es.readyState === 1; // EventSource.OPEN
+        const wsOk  = ws && ws.readyState === WebSocket.OPEN;
+        if (!sseOk && !wsOk) reconnectNow();
+      } catch(_){}
     });
   }catch(e){
     console.error('initUI 发生错误：', e);
