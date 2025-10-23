@@ -1055,7 +1055,34 @@ function renderBookList(){
   const container=document.getElementById('book-list'); if (!container) return;
   container.innerHTML='';
   if (discoveredBooks.size===0){ container.innerHTML=`<div class="no-books-message">暂无书商数据</div>`; return; }
-  const sorted=Array.from(discoveredBooks).sort();
+  // 1) Compute sorted array of discovered books
+  const sorted = Array.from(discoveredBooks).sort();
+  // 2) Insert master checkbox row if any books
+  if (sorted.length > 0) {
+    const master = document.createElement('div');
+    master.className = 'book-item book-all';
+    master.innerHTML = `<input type="checkbox" id="chk-book-all"><label for="chk-book-all">全选</label>`;
+    const masterChk = master.querySelector('input');
+    const allOn = sorted.every(b => settings.books[b] !== false);
+    masterChk.checked = allOn;
+    masterChk.addEventListener('change', () => {
+      sorted.forEach(b => { settings.books[b] = !!masterChk.checked; });
+      saveSettings();
+      // 如 A 平台被取消勾选，回退到第一个已勾选的
+      const enabled = getEnabledBooks();
+      if (!enabled.includes(normBookKey(settings.stake?.aBook||''))) {
+        settings.stake.aBook = enabled[0] || '';
+      }
+      updateABookOptions();
+      renderRebateSettings();
+      renderMarketBoard();
+      recalculateAllArbitrageOpportunities();
+      // 重新渲染列表以同步各项勾选状态
+      renderBookList();
+    });
+    container.appendChild(master);
+  }
+  // 3) Render individual book checkboxes
   sorted.forEach(book=>{
     const item=document.createElement('div'); item.className='book-item';
     const id=`chk-book-${book}`; const checked=settings.books[book] !== false;
@@ -1067,6 +1094,12 @@ function renderBookList(){
       if (!chk.checked && currentABook===book){ const enabled=getEnabledBooks(); settings.stake.aBook=enabled[0]||''; updateABookOptions(); }
       normalizeRebateABSelections(); renderRebateSettings(); renderMarketBoard(); recalculateAllArbitrageOpportunities();
     });
+    // 4) 同步“全选”状态
+    const allChk = document.getElementById('chk-book-all') || container.querySelector('#chk-book-all');
+    if (allChk) {
+      const allOnNow = Array.from(discoveredBooks).every(k => settings.books[k] !== false);
+      allChk.checked = allOnNow;
+    }
     container.appendChild(item);
   });
 }
@@ -1230,8 +1263,20 @@ function initHamburgerMenu(){
   else { overlay.classList.remove('active'); overlay.style.pointerEvents='none'; }
   if (!btn || !drawer) return;
 
-  function openDrawer(){ drawer.classList.add('active'); overlay.classList.add('active'); overlay.style.pointerEvents='auto'; document.body.style.overflow='hidden'; }
-  function closeDrawer(){ drawer.classList.remove('active'); overlay.classList.remove('active'); overlay.style.pointerEvents='none'; document.body.style.overflow=''; }
+  function openDrawer(){ 
+    drawer.classList.add('active'); 
+    overlay.classList.add('active'); 
+    overlay.style.pointerEvents='auto'; 
+    document.body.style.overflow='hidden'; 
+    if (btn) { btn.style.visibility = 'hidden'; btn.style.pointerEvents = 'none'; }
+  }
+  function closeDrawer(){ 
+    drawer.classList.remove('active'); 
+    overlay.classList.remove('active'); 
+    overlay.style.pointerEvents='none'; 
+    document.body.style.overflow=''; 
+    if (btn) { btn.style.visibility = 'visible'; btn.style.pointerEvents = 'auto'; }
+  }
   // 允许外部调用 collapseSettingsDrawer
   window.__collapseSettingsDrawer = closeDrawer;
   btn.addEventListener('click',(e)=>{ e.preventDefault(); e.stopPropagation(); openDrawer(); });
