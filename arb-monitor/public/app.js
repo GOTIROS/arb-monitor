@@ -1203,14 +1203,23 @@ function hideReconnectButton(){ const b=document.getElementById('reconnect-now')
 
 // 折叠设置抽屉（helper）
 function collapseSettingsDrawer() {
-  const drawer = document.querySelector('#drawer, [data-drawer], .drawer');
+  const drawer  = document.querySelector('#drawer, [data-drawer], .drawer');
   const overlay = document.getElementById('drawerOverlay');
+  const btn     = document.querySelector('#hamburgerBtn, #hamburger, .hamburger-btn, .hamburger, .menu-btn, [data-hamburger]');
+
+  // 关闭抽屉
   if (drawer) drawer.classList.remove('active');
   if (overlay) {
     overlay.classList.remove('active');
     overlay.style.pointerEvents = 'none';
   }
   document.body.style.overflow = '';
+
+  // 关键：恢复汉堡按钮的可见与可点击
+  if (btn) {
+    btn.style.visibility = 'visible';
+    btn.style.pointerEvents = 'auto';
+  }
 }
 
 // 注入设置面板顶部工具栏
